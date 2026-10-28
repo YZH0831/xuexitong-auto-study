@@ -32,14 +32,20 @@ jobs:
 
       - name: Run offline tests
         run: |
-          set -e
+          python -V
+          fail=0
           for f in tests/test_*.py; do
-            case "$f" in
-              *capture_font_fixture*|*smoke_test*|*bench*) echo "skip $f"; continue;;
-            esac
             echo "=== $f ==="
-            python "$f"
+            if out=$(python "$f" 2>&1); then
+              echo "PASS  $f"
+            else
+              echo "$out" | tail -30
+              msg=$(echo "$out" | tail -c 800 | tr '\n' ' ' | tr -d '\r')
+              echo "::error title=FAILED ${f}::${msg}"
+              fail=1
+            fi
           done
+          exit $fail
 
       - name: Build package
         run: python tools/package.py

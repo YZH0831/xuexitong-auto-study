@@ -14,7 +14,10 @@ from cxlab.online_answer import (                          # noqa: E402
 
 logging.basicConfig(level=logging.CRITICAL)
 log = logging.getLogger("regress")
-cfg = Config(load_config(str(Path(ROOT) / "config.yaml")))
+CFG_PATH = Path(ROOT) / "config.yaml"
+if not CFG_PATH.exists():
+    CFG_PATH = Path(ROOT) / "config.example.yaml"   # CI 里没有个人配置
+cfg = Config(load_config(str(CFG_PATH)))
 cfg["quiz"]["online_search"]["min_interval_s"] = 0
 cfg["quiz"]["online_search"]["skip_when_obfuscated"] = False
 

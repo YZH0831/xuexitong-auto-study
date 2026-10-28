@@ -58,7 +58,8 @@ def collect():
                 continue
             if p.suffix.lower() in EXCLUDE_SUFFIX:
                 continue
-            if p.name.startswith("_"):          # 临时/调试文件
+            # 临时/调试文件（_foo.py、_脚本.sh）跳过，但 __init__.py / __main__.py 必须保留
+            if p.name.startswith("_") and not p.name.startswith("__"):
                 continue
             files.append(p)
     return sorted(set(files))
@@ -96,6 +97,18 @@ def main():
             total += p.stat().st_size
     # 版本文件也塞进去，方便解压后核对
     (ROOT / "VERSION").write_text(f"{__version__}\n", encoding="utf-8")
+
+    # 自检：分发包必须完整可运行（曾因 "_" 排除规则漏掉全部 __init__.py）
+    with zipfile.ZipFile(out) as z:
+        names = z.namelist()
+        missing = []
+        for text in ("cxlab/__init__.py", "main.py", "requirements.txt", "config.example.yaml"):
+            if not any(n.endswith("/" + text) for n in names):
+                missing.append(text)
+    if missing:
+        print(f"✘ 自检失败：分发包缺文件 {missing}")
+        return 2
+
     print(f"③ 完成：{out}")
     print(f"   原始 {total/1024/1024:.1f} MB → 压缩后 {out.stat().st_size/1024/1024:.1f} MB")
     print(f"   解压后目录：{top}/")

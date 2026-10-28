@@ -50,6 +50,23 @@ jobs:
       - name: Build package
         run: python tools/package.py
 
+      # 分发包必须"解压即用"：曾因打包排除规则漏掉 __init__.py 而无人发现
+      - name: Verify package is runnable
+        run: |
+          set -e
+          rm -rf /tmp/pkg && mkdir -p /tmp/pkg
+          unzip -q dist/*.zip -d /tmp/pkg
+          cd /tmp/pkg/chaoxing-auto-study-*/
+          echo "--- import 检查 ---"
+          python -c "import cxlab, sys; print('cxlab', cxlab.__version__); assert cxlab.__version__"
+          echo "--- CLI 检查 ---"
+          python main.py --version
+          echo "--- 敏感文件不得入包 ---"
+          for f in config.yaml state/storage_state.json data/question_pool.json; do
+            if [ -e "$f" ]; then echo "::error title=包内含敏感文件::$f"; exit 1; fi
+          done
+          echo "✔ 分发包可用"
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:

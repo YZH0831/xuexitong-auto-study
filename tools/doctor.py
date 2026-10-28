@@ -165,7 +165,14 @@ def main():
     if bad:
         print(f"{BAD} 有 {bad} 项必须修复，{warn} 项建议完善。修好后重跑本命令。")
         return 1
-    print(f"{OK} 环境可用（{warn} 项建议项可忽略）。下一步：双击 ChaoxingAutoStudy.bat")
+    # 提示下一步：分发包里没有桌面入口 ChaoxingAutoStudy.bat，只认 setup/start
+    win = os.name == "nt"
+    ready = (ROOT / "config.yaml").exists()
+    if win:
+        cmd = "start.bat" if ready else "setup.bat（装完再双击 start.bat）"
+    else:
+        cmd = "./start.sh" if ready else "./setup.sh（装完再运行 ./start.sh）"
+    print(f"{OK} 环境可用（{warn} 项建议项可忽略）。下一步：{'双击' if win else '运行'} {cmd}")
     return 0
 
 

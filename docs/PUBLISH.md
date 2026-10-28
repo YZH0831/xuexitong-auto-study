@@ -15,19 +15,19 @@
 ## 方式 A：命令行脚本推送
 
 1. 打开 <https://github.com/new>
-   - Repository name：`chaoxing-auto-study`
+   - Repository name：`xuexitong-auto-study`
    - 可见性：Public 或 Private 都行
    - **不要**勾选 "Add a README / .gitignore / license"（本地已经有了，勾了会冲突）
 2. 在项目目录执行：
 
 ```bash
-bash tools/publish.sh git@github.com:<你的用户名>/chaoxing-auto-study.git
+bash tools/publish.sh git@github.com:<你的用户名>/xuexitong-auto-study.git
 ```
 
 没配 SSH key 的话用 HTTPS + Token：
 
 ```bash
-GITHUB_TOKEN=ghp_你的token bash tools/publish.sh https://github.com/<你的用户名>/chaoxing-auto-study.git
+GITHUB_TOKEN=ghp_你的token bash tools/publish.sh https://github.com/<你的用户名>/xuexitong-auto-study.git
 ```
 
 Token 在 <https://github.com/settings/tokens> 创建（classic token 勾 `repo` 即可；
@@ -36,7 +36,7 @@ fine-grained 需要 `Contents: Read and write`）。**用完记得删掉那个 t
 ## 方式 B：手动三条命令
 
 ```bash
-git remote add origin git@github.com:<你的用户名>/chaoxing-auto-study.git
+git remote add origin git@github.com:<你的用户名>/xuexitong-auto-study.git
 git push -u origin main
 git remote -v
 ```

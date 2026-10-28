@@ -3,7 +3,16 @@
 本地仓库已经准备好（`main` 分支、首个提交 v1.0.0、密钥扫描钩子已启用）。
 剩下只有"建远程仓库 + 推上去"这一步，二选一即可。
 
-## 方式 A：先建仓库，再用脚本推送（推荐，安全）
+## 方式 0：双击 `publish.bat`（最省事）
+
+1. 打开 <https://github.com/new> 建一个**空仓库**（名字如 `chaoxing-auto-study`，
+   **不要**勾 Add README / .gitignore / license）
+2. 双击项目根目录的 `publish.bat`
+3. 按提示粘贴仓库地址；若是 HTTPS 地址，再粘贴一次 Token（输入不回显）
+
+脚本会先跑密钥扫描，通过后才推送；Token 只用一次，推完自动从 `git remote` 里抹掉。
+
+## 方式 A：命令行脚本推送
 
 1. 打开 <https://github.com/new>
    - Repository name：`chaoxing-auto-study`

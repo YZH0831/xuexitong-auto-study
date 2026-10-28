@@ -1,0 +1,41 @@
+name: Purge build artifacts
+
+# 一次性清理 GitHub Actions 构建产物。
+# 起因：CI 曾把 dist/*.zip 上传为 artifact，脱敏前的旧包（含开发日志）因此残留在
+# Actions 页面可下载。CI 已不再上传，这里把存量一并删掉。
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/purge-artifacts.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete every artifact in this repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          REPO="${{ github.repository }}"
+          ids=$(gh api "repos/${REPO}/actions/artifacts?per_page=100" --paginate -q '.artifacts[].id' || true)
+          if [ -z "$ids" ]; then
+            echo "没有需要删除的 artifact"
+            exit 0
+          fi
+          n=0
+          for id in $ids; do
+            if gh api -X DELETE "repos/${REPO}/actions/artifacts/${id}" >/dev/null 2>&1; then
+              echo "已删除 artifact ${id}"
+              n=$((n + 1))
+            else
+              echo "::warning title=删除失败::artifact ${id}"
+            fi
+          done
+          echo "共删除 ${n} 个 artifact"
+          echo "### 已清理 ${n} 个构建产物" >> "$GITHUB_STEP_SUMMARY"

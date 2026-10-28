@@ -67,9 +67,5 @@ jobs:
           done
           echo "✔ 分发包可用"
 
-      - name: Upload package artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-py${{ matrix.python-version }}
-          path: dist/*.zip
-          if-no-files-found: warn
+      # 不再上传构建产物：分发包只在 Release 里发布一份，
+      # 避免 artifact 长期堆积（private 数据的旧包曾因此残留）

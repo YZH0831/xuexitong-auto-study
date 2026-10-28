@@ -1,0 +1,156 @@
+# ========== 账号 ==========
+account:
+  phone: ""                  # 学习通手机号（密码登录时必填）
+  password: ""               # 学习通密码
+  login_method: qr           # qr=扫码登录(推荐，最稳) | password=手机号+密码
+  sms_code: ""               # 若登录需要短信验证码：可预先填写，否则运行时在控制台输入
+
+# ========== 课程 ==========
+course:
+  name_contains: "*"             # "*"=处理「我的课程」里的全部课程；也可填关键词（如"实验室安全"）只处理匹配的课程
+  url: ""                       # 可选：直接填课程学习页地址（填了则优先使用，跳过课程列表匹配）
+  skip_completed: true          # 跳过已完成的章节（绿色标记 / 接口 finish=total）
+  skip_no_task_nodes: true      # 跳过「无任务点」的知识点（纯图文、未布置任务）
+  scope: chapters               # chapters=只刷章节任务点 | task_center=只刷教学任务 | both=两者都刷
+  selected_courses: []          # 精确指定要跑的课程（名称关键词或 courseId），非空时优先于 name_contains
+                                #   例：["实验室安全"] → 只跑这门课；["实验室安全","高等数学"] → 批量跑两门
+  exclude_courses: []           # 排除的课程（名称关键词或 courseId），例：["某课程甲"]
+  pick_interactively: false     # true=运行时交互选择：① 字母多选课程 ② 课时范围 ③ 确认执行
+  # ---- 截止日期 / 课程状态判定 ----
+  deadline_policy: skip         # skip=自动排除已结束/已退课/已过期 | mark=只标记不排除 | all=不判断
+  skip_ended_courses: true      # 读取平台「已结束课程/已退课课程」列表（优先于日期）
+  skip_past_deadline: true      # 结束日期已过 → 排除
+  skip_not_started: false       # 未开课 → 排除
+  unknown_status_policy: keep   # 无日期信息：keep=照常处理 | skip=排除
+  deadline_overrides: {}        # {课程名: "2026-10-31"}；"忽略"=强制处理
+  lesson_selection:             # 课时（知识点）级选择
+    mode: all                   # all=全部课时 | index=按序号筛选 | pick=运行时交互选择
+    indexes: ""                 # mode=index 时生效，如 "1-5,8"（也支持字母 A,C）
+    per_course: {}              # 按课程分别指定，如 {实验室安全: "1-3", 高等数学: "2,4"}
+
+# ========== 浏览器 ==========
+browser:
+  channel: auto                 # auto=自动探测(Edge→Chrome→Chromium) | msedge | chrome | chromium
+  headless: false               # 强烈建议 false：扫码、过验证码、人工答题时都需要能看到浏览器
+  slow_mo: 50                   # 每步操作间隔(ms)，模拟人类，可加大到 100~300 更稳
+  window_width: 1600
+  window_height: 900
+
+# ========== 登录 ==========
+login:
+  qr_timeout_s: 300             # 扫码登录等待时长(秒)
+  max_retry: 3                  # 密码登录失败重试次数
+  # ---- 掉线自愈（单端登录：手机端登录会把电脑端顶下线）----
+  auto_relogin: true            # 自动重新登录（配置账号密码才能真正无人值守）
+  check_interval_s: 60          # 会话健康探测间隔(秒)
+  relogin_max_attempts: 3       # 每次掉线的密码重登录尝试次数
+  max_relogin_per_hour: 6       # 每小时最多自动重登录次数
+  relogin_cooldown_s: 600       # 超限后的冷却时长(秒)
+  net_retry_delays_s: [15, 30, 60, 120, 300]   # 断网重试退避序列(秒)
+  qr_wait_s: 300                # 需人工扫码时的等待时长(秒)
+
+# ========== 视频 ==========
+video:
+  speed: 1.0                    # 播放倍速。实测倍速普遍不被平台登记（按真实时间核验），默认 1.0；
+                                # 若设为 >1 且平台未登记，程序会自动用 1 倍速重播一次
+  duration_required_1x: true    # 是否强制：有时长要求的视频必须真实 1 倍速播放（平台按真实时间计）
+  timeout_per_video_min: 120    # 单个视频最长等待(分钟)
+  poll_interval_s: 3            # 播放状态轮询间隔(秒)
+
+# ========== 文档/课件 ==========
+document:
+  page_delay_ms: 1500           # 翻页间隔
+  dwell_last_page_s: 10         # 翻到最后一页后的停留时间(秒)
+  read_duration_1x: true        # 检测到"阅读N分钟"要求时真实等待
+  max_seconds: 900              # 单个文档最长处理时间(秒)
+
+# ========== 章节测验 ==========
+quiz:
+  on_unknown: pause             # 题库没有答案时：pause=暂停等你在浏览器里手工答 | skip=跳过 | submit_blank=直接交
+  pause_timeout_s: 900          # 人工答题等待时长(秒)
+  max_attempts: 1               # 提交次数；部分测验允许多次作答，酌情调大
+  answers_file: "data/answers.json"        # 本地题库（可预先录入题目）
+  pool_file: "data/question_pool.json"     # 自动沉淀题库：提交后从结果页回读正确答案写入这里
+  decode_font: true              # 用加密字体映射还原题面（学习通对题目文本做了 cxSecretStyle 混淆）
+  font_table: "data/font_map_table.json"   # 标准字形哈希表（取自开源项目）
+  # 第三方题库接口：结构化返回答案，命中率远高于网页搜索，建议优先于联网搜题启用
+  #   icodef       GO题/网课小工具  https://cx.icodef.com    （免费 token，关注公众号领取）
+  #   enncy        言溪题库         https://tk.enncy.cn       （免费 token）
+  #   tikuadapter  自建聚合服务     https://github.com/DokiDoki1103/tikuAdapter（多题库聚合）
+  # 多个 provider 按顺序尝试，命中即止
+  tiku:
+    enabled: false                # 填好 token/url 后改 true
+    timeout_s: 12
+    max_calls: 300                # 单次运行最多查询次数
+    min_stem_len: 6               # 题干太短不查（易误命中）
+    providers: []
+    # 示例：
+    # providers:
+    #   - type: icodef
+    #     token: "你的icodef token"
+    #   - type: enncy
+    #     token: "你的言溪 token"
+    #   - type: tikuadapter
+    #     url: "http://127.0.0.1:8060"
+
+  online_search:                 # 本地题库未命中时 → 联网搜题兜底
+    cross_check: true             # 双源核对：通用搜索 + 作业帮（一致才判定有效）
+    conflict_policy: prefer_zuoyebang  # 冲突采信：prefer_zuoyebang / prefer_search / manual
+    engine_order: [bing, baidu, sogou]  # 通用通道引擎顺序（被限流自动降级）
+    zuoyebang_engine: sogou       # 作业帮通道引擎（与主引擎不同可增强独立性）
+    enabled: true                 # 是否启用联网搜题
+    engine: bing                  # bing | baidu
+    max_searches: 40              # 单次运行最多联网搜索次数（频率控制）
+    min_interval_s: 8             # 两次搜索最小间隔(秒)，随机抖动，防触发风控
+    timeout_s: 20                 # 单次搜索超时(秒)
+    skip_when_obfuscated: true    # 题面被字体混淆时跳过联网搜索（搜索无意义）
+    reverify_unverified: true     # 本地"未验证"答案遇到联网双源一致的不同答案时，以联网为准
+  # 大模型答题：AI 读懂题直接推理作答，不依赖搜网页（OpenAI 兼容接口，填任一家 Key 即可）
+  #   DeepSeek : https://api.deepseek.com/v1 + deepseek-flash（V4.1-Flash）/ deepseek-v4-pro
+  #   Kimi     : https://api.moonshot.cn/v1 + kimi-k2.6 / kimi-k3（K3 需 reasoning_effort: low）
+  #   Ollama   : http://localhost:11434/v1   + qwen2.5:7b（api_key 随便填）
+  # 图形界面填写：双击 SetDeepSeekKey.bat（或 py tools/set_key_gui.py）
+  llm:
+    enabled: false                # 填好 api_key 后改 true 才生效
+    base_url: https://api.deepseek.com/v1
+    api_key: ""                   # 或设环境变量 DEEPSEEK_API_KEY / MOONSHOT_API_KEY
+    model: deepseek-flash
+    reasoning_effort: ""          # 仅推理模型需要（如 kimi-k3 填 low）；普通模型留空
+    max_calls: 200                # 单次运行最多调用次数（防刷爆额度）
+    min_confidence: 0.55          # 低于此置信度不自动作答（宁缺勿错）
+    cross_check_with_search: false  # 大模型答完是否再用联网搜索交叉验证
+
+# ========== 拟人化操作 ==========
+humanize:
+  enabled: true                  # 鼠标轨迹 + 随机延时 + 滚动，模拟真人操作
+  click_before_ms: [200, 900]    # 点击前随机延时范围(毫秒)
+  click_after_ms: [300, 1200]    # 点击后随机延时范围(毫秒)
+  mouse_steps: [8, 20]           # 鼠标轨迹分段数
+  scroll_times: [1, 3]           # 每个任务前随机滚动次数
+  scroll_step_px: [200, 600]
+  long_pause_every: 6            # 每 N 次操作插一次长暂停（0=关闭）
+  long_pause_s: [15, 45]
+
+# ========== 安全限制 ==========
+safety:
+  max_runtime_min: 0             # 单次最长运行(分钟)，0=不限
+  max_tasks_per_run: 0           # 单次最多处理任务点数，0=不限
+  min_task_interval_s: 3         # 任务之间最小间隔(秒)
+  stop_on_risk: false            # true=遇风控立即停止；false=暂停等人工处理
+  confirm_before_run: false      # true=非交互模式也在执行前打印计划并要求确认
+
+# ========== 作业 ==========
+homework:
+  mode: manual                  # manual=打开作业页后由人工完成 | auto=按下面文本自动填写并提交
+  answer_text: "本人已完成本课程全部内容的学习，现将作业提交。"
+
+# ========== 弹窗/风控 ==========
+popup:
+  auto_close: true              # 自动关闭已知类型的弹窗
+  pause_on_antispider: true     # 遇到验证码/风控页面时暂停，等待人工处理后继续
+
+# ========== 输出 ==========
+output_dir: "output"            # 完成报告输出目录
+state_dir: "state"              # 登录态(cookie)保存目录
+log_dir: "logs"                 # 运行日志目录
+log_level: INFO                 # DEBUG 可输出页面结构，便于排查选择器问题

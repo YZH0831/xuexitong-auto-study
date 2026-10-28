@@ -1,0 +1,42 @@
+# ===== 隐私与凭据（绝对不要提交）=====
+# 含 API Key / 手机号 / 密码
+config.yaml
+config.yaml.bak
+*.bak
+# 登录态 cookie、GUI 错误日志、桌面 BAT 备份
+state/
+# 运行日志（含课程名、题目）
+logs/
+# 完成报告
+output/
+# 自动沉淀的题库（含你课程的真实题目与答案）
+data/question_pool.json
+data/*.local.json
+.env
+*.key
+*.pem
+
+# ===== 课程/账号相关的本地目录 =====
+某课程甲/
+某思政课/
+某测试课/
+
+# ===== 运行产物 =====
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+*.spec
+*.zip
+.tmp/
+tmp/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

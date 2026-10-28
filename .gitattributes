@@ -1,0 +1,14 @@
+# 统一换行：源码用 LF，Windows 脚本必须 CRLF（否则 cmd 会串行报错）
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.sh text eol=lf
+
+# 二进制/大文件不参与换行转换与 diff
+*.png binary
+*.jpg binary
+*.zip binary
+*.ttf binary
+*.otf binary
+data/font_map_table.json -diff linguist-generated

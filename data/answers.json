@@ -1,0 +1,10 @@
+{
+  "_说明": "手工题库。answer 可填选项字母(A / AB)或选项完整文本；type 可选 single/multi/judge/text。程序自动沉淀的题会写入 data/question_pool.json",
+  "questions": [
+    {
+      "stem": "示例：进入实验室必须穿戴的实验服是",
+      "answer": "A",
+      "type": "single"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+# 运行依赖（Windows 10/11 + Python 3.10+）
+playwright>=1.40      # 浏览器自动化：驱动本机已安装的 Edge/Chrome，无需 playwright install
+PyYAML>=6.0           # 配置文件解析
+fonttools>=4.60       # 解析加密字体（题面还原）

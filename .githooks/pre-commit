@@ -1,0 +1,10 @@
+#!/bin/sh
+# 提交前拦截：把 API Key / Cookie / 手机号挡在仓库外面。
+# 安装：bash tools/install_hooks.sh
+PY=".venv/Scripts/python.exe"
+[ -x "$PY" ] || PY="python"
+"$PY" tools/check_secrets.py --staged || {
+  echo ""
+  echo "提交已阻止：请先清掉上面的敏感信息（详见 tools/check_secrets.py）。"
+  exit 1
+}

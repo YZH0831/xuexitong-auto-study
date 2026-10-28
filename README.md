@@ -186,6 +186,8 @@ start.bat key      :: 密钥设置
 
 ### 配置密钥（可选）
 
+![密钥设置界面](docs/images/key-gui.png)
+
 双击菜单里的 `[K]`，或
 
 ```bat

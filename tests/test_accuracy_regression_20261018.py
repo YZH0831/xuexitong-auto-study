@@ -4,7 +4,7 @@ import logging
 import sys
 from pathlib import Path
 
-ROOT = r"C:\Users\YZH\WorkBuddy\2026-10-13-21-34-43\chaoxing-lab-safety"
+ROOT = str(Path(__file__).resolve().parent.parent)
 sys.path.insert(0, ROOT)
 
 from cxlab.config import Config, load_config               # noqa: E402
@@ -14,7 +14,7 @@ from cxlab.online_answer import (                          # noqa: E402
 
 logging.basicConfig(level=logging.CRITICAL)
 log = logging.getLogger("regress")
-cfg = Config(load_config(ROOT + r"\config.yaml"))
+cfg = Config(load_config(str(Path(ROOT) / "config.yaml")))
 cfg["quiz"]["online_search"]["min_interval_s"] = 0
 cfg["quiz"]["online_search"]["skip_when_obfuscated"] = False
 
@@ -94,14 +94,21 @@ results.append(case("anchor_score(pos) 对 A 不再系统性为 0",
 # 10. 题库：JSON 里的 source 不再丢失；判断题脏答案 "AC" 自动失效
 import json  # noqa: E402
 from cxlab.answers import QuestionBank  # noqa: E402
-bank = QuestionBank(ROOT + r"\data\answers.json", ROOT + r"\data\question_pool.json", log)
-pool = json.loads(Path(ROOT + r"\data\question_pool.json").read_text(encoding="utf-8"))
-bad = pool[3]
-results.append(case("判断题脏答案 AC 不再被当成本地答案",
-                    bank.lookup(bad["stem"]), None))
-leaked = [i[:20] for i in pool
-          if i.get("source") == "online" and (bank.lookup(i["stem"]) or {}).get("verified")]
-results.append(case("pool 的 online 来源不再被当成已验证", leaked, []))
+
+POOL_FILE = Path(ROOT) / "data" / "question_pool.json"
+if POOL_FILE.exists():
+    bank = QuestionBank(str(Path(ROOT) / "data" / "answers.json"), str(POOL_FILE), log)
+    pool = json.loads(POOL_FILE.read_text(encoding="utf-8"))
+    if len(pool) > 3:
+        bad = pool[3]
+        results.append(case("判断题脏答案 AC 不再被当成本地答案",
+                            bank.lookup(bad["stem"]), None))
+    leaked = [i[:20] for i in pool
+              if i.get("source") == "online" and (bank.lookup(i["stem"]) or {}).get("verified")]
+    results.append(case("pool 的 online 来源不再被当成已验证", leaked, []))
+else:
+    # data/question_pool.json 是个人题库，不进仓库（.gitignore），CI 里没有它
+    print("[SKIP] 没有 data/question_pool.json（个人题库不入库），跳过题库沉淀相关断言")
 
 print()
 print("PASS" if all(results) else "FAIL", f"{sum(results)}/{len(results)}")

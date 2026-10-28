@@ -29,7 +29,8 @@ INCLUDE_DIRS = ["cxlab", "tools", "tests", "docs", ".githooks", ".github"]
 # 文件白名单
 INCLUDE_FILES = [
     "main.py", "requirements.txt", "config.example.yaml",
-    "setup.bat", "start.bat", "SetDeepSeekKey.bat", "run.bat", "run_dry.bat", "publish.bat",
+    "setup.bat", "start.bat", "SetDeepSeekKey.bat", "SetTiku.bat",
+    "run.bat", "run_dry.bat", "publish.bat", "setup.sh", "start.sh",
     "README.md", "CHANGELOG.md", "LICENSE", "VERSION", ".gitignore",
     "data/font_map_table.json", "data/answers.json",
 ]

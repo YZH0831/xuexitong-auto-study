@@ -5,7 +5,8 @@ cd /d "%~dp0"
 
 rem ---------- find a Python that has tkinter (the .venv has none) ----------
 set "PYW="
-for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
+rem 两个候选根目录都试：某些终端/服务账号下 LOCALAPPDATA 可能为空
+for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*" "%USERPROFILE%\AppData\Local\Programs\Python\Python3*") do (
   if exist "%%~D\python.exe" (
     "%%~D\python.exe" -c "import tkinter" >nul 2>&1
     if not errorlevel 1 set "PYW=%%~D\pythonw.exe"

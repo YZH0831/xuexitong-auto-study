@@ -4,7 +4,7 @@
 > 带**字体混淆解码**、**选项顺序对齐**、**题库→大模型→双源搜题→兜底推理**四级答题链路，
 > 以及**环境自检 / 密钥图形设置 / 密钥扫描**等工程化配套。
 
-当前版本：**v1.0.0**（2026-10-28）｜平台：Windows 10/11｜许可：GPL-3.0
+当前版本：**v1.0.0**（2026-10-28）｜平台：Windows 10/11（另有 macOS/Linux 的 `.sh` 脚本）｜许可：GPL-3.0
 
 ---
 
@@ -95,6 +95,7 @@
 |---|---|---|
 | 操作系统 | Windows 10 / 11（64 位） | 入口脚本为 `.bat`；Python 代码本身跨平台 |
 | Python | **3.10+**（实测 3.13.14） | 安装时勾选 `Add python.exe to PATH` |
+| 非 Windows | macOS / Linux / WSL 可用 `./setup.sh` + `./start.sh` | 需 `python3 -m playwright install chromium` |
 | 浏览器 | Microsoft Edge（系统自带）或 Chrome | 程序**不下载** playwright 自带浏览器，直接用本机已装的 |
 | 磁盘 | ≥ 200 MB | 主要占用是 `.venv` 与字形表（1.6 MB） |
 | 网络 | 能访问学习通、PyPI | 国内建议保留清华镜像（`setup.bat` 已内置） |
@@ -147,6 +148,7 @@ fonttools>=4.60       # 解析加密字体（题面还原）
    [8] 编辑配置
    [9] 清除登录态
    [K] 设置大模型密钥（DeepSeek / Kimi / 本地 Ollama）
+   [T] 配置第三方题库（icodef / 言溪 / tikuAdapter）
    [D] 环境自检
    [0] 退出
 ```
@@ -162,6 +164,7 @@ start.bat video    :: 只刷视频/音频
 start.bat pick     :: 交互选课程与课时
 start.bat doctor   :: 环境自检
 start.bat key      :: 密钥设置
+start.bat tiku     :: 题库配置
 ```
 
 ### 命令行
@@ -202,7 +205,8 @@ start.bat key      :: 密钥设置
 
 ### 接第三方题库（推荐，准确率提升明显）
 
-在 `config.yaml` 里填 token 后启用（`icodef` / 言溪 都能免费领）：
+双击菜单 `[T]`（或 `SetTiku.bat`）打开设置窗口：勾选题库 → 填 token/地址 → 测试连通性 → 保存。
+也可以直接改 `config.yaml`（`icodef` / 言溪 都能免费领 token）：
 
 ```yaml
 quiz:
@@ -318,5 +322,5 @@ chaoxing-auto-study/
 - 题库协议参考 [tikuAdapter](https://github.com/DokiDoki1103/tikuAdapter) 的开放接口格式。
 - 鼠标轨迹移植自 ghost-cursor 的贝塞尔曲线思路。
 
-完整许可证见 [LICENSE](LICENSE)；开发过程与实测数据见 [docs/DEVLOG.md](docs/DEVLOG.md)，
+**作者**：cxlab（项目代号）。完整许可证见 [LICENSE](LICENSE)；开发过程与实测数据见 [docs/DEVLOG.md](docs/DEVLOG.md)，
 架构细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。

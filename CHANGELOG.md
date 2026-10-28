@@ -24,6 +24,9 @@
   配合 `.githooks/pre-commit` 在提交前拦截；日志自动脱敏（Key、手机号、password）。
 - **一键安装与菜单** `setup.bat` / `start.bat`：自动建 venv、装依赖（清华镜像失败回退官方源）、
   生成 config.yaml、自检；菜单显示实时密钥状态，支持 `start.bat run|quiz|video|pick|doctor|key` 直达。
+- **题库图形配置** `tools/tiku_gui.py` + `SetTiku.bat` + 菜单 `[T]`：勾选 provider、填 token/地址、
+  一键测试连通性，保存时整块替换 `quiz.tiku`（保留其它配置与注释、幂等不重复插入）。
+- **跨平台** `setup.sh` / `start.sh`：macOS / Linux / WSL 也能装和跑（Windows 仍用 `.bat`）。
 - **打包** `tools/package.py`：白名单收集文件（私人数据不进包）、打包前强制密钥扫描，
   产物 `dist/chaoxing-auto-study-v<版本>.zip`。
 - `--version`、`VERSION`、`cxlab/version.py`：统一版本来源。

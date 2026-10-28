@@ -17,6 +17,7 @@ if /i "%~1"=="video" goto vid
 if /i "%~1"=="pick"  goto pick
 if /i "%~1"=="list"  goto list
 if /i "%~1"=="key"   goto setkey
+if /i "%~1"=="tiku"  goto settiku
 if /i "%~1"=="doctor" goto doctor
 
 :menu
@@ -43,6 +44,7 @@ echo    [7] 打开报告目录
 echo    [8] 编辑配置    ：课程、课时、拟人化、安全限制等
 echo    [9] 清除登录态  ：换账号或登录异常时用
 echo    [K] 设置大模型密钥（DeepSeek / Kimi / 本地 Ollama）
+echo    [T] 配置第三方题库（icodef / 言溪 / tikuAdapter，提高答题准确率）
 echo    [D] 环境自检    ：依赖/浏览器/配置/网络一次查清
 echo    [0] 退出
 echo ============================================================
@@ -62,6 +64,7 @@ if "%opt%"=="7" goto rep
 if "%opt%"=="8" goto cfg
 if "%opt%"=="9" goto relogin
 if /i "%opt%"=="k" goto setkey
+if /i "%opt%"=="t" goto settiku
 if /i "%opt%"=="d" goto doctor
 if "%opt%"=="0" goto end
 goto menu
@@ -149,6 +152,20 @@ if errorlevel 1 (
   echo [!] 没能打开图形界面（缺少带 tkinter 的 Python）。
   echo     可改用命令行：
   echo     .venv\Scripts\python.exe tools\set_key_gui.py --set-key sk-你的密钥
+  echo.
+  pause
+)
+goto menu
+
+:settiku
+echo.
+echo === 配置第三方题库 ===
+echo    （关掉设置窗口后会自动回到菜单）
+call "%~dp0SetTiku.bat"
+if errorlevel 1 (
+  echo.
+  echo [!] 没能打开图形界面，可改用命令行：
+  echo     .venv\Scripts\python.exe tools\tiku_gui.py --show
   echo.
   pause
 )

@@ -1,0 +1,75 @@
+name: Release
+
+# 推送 v* 标签即自动创建 GitHub Release 并附上分发包。
+# 无需任何手动凭据：使用 Actions 自带的 GITHUB_TOKEN。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布或重建的标签（如 v1.0.0）"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Secret scan
+        run: python tools/check_secrets.py
+
+      - name: Build package
+        run: python tools/package.py
+
+      - name: Verify package is runnable
+        run: |
+          set -e
+          rm -rf /tmp/pkg && mkdir -p /tmp/pkg
+          unzip -q dist/*.zip -d /tmp/pkg
+          cd /tmp/pkg/chaoxing-auto-study-*/
+          python -c "import cxlab; print('cxlab', cxlab.__version__); assert cxlab.__version__"
+          python main.py --version
+          for f in config.yaml state/storage_state.json data/question_pool.json; do
+            if [ -e "$f" ]; then echo "::error title=包内含敏感文件::$f"; exit 1; fi
+          done
+          echo "✔ 分发包可用"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -e
+          NOTES=".github/release-notes/${TAG}.md"
+          if [ ! -f "$NOTES" ]; then
+            echo "::warning title=缺少发布说明::未找到 $NOTES，改用标签名作说明"
+            NOTES=/dev/null
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，改为覆盖附件与说明"
+            gh release edit "$TAG" --notes-file "$NOTES" || true
+            gh release upload "$TAG" dist/*.zip --clobber
+          else
+            gh release create "$TAG" dist/*.zip \
+              --title "$TAG" \
+              --notes-file "$NOTES" \
+              --verify-tag
+          fi
+          gh release view "$TAG" --json url,name -q '.url'

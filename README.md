@@ -328,5 +328,4 @@ xuexitong-auto-study/          # clone 后的目录名（GitHub 仓库名）
 - 题库协议参考 [tikuAdapter](https://github.com/DokiDoki1103/tikuAdapter) 的开放接口格式。
 - 鼠标轨迹移植自 ghost-cursor 的贝塞尔曲线思路。
 
-**作者**：cxlab（项目代号）。完整许可证见 [LICENSE](LICENSE)；开发过程与实测数据见 [docs/DEVLOG.md](docs/DEVLOG.md)，
-架构细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+**作者**：cxlab（项目代号）。完整许可证见 [LICENSE](LICENSE)；技术设计与取舍见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。

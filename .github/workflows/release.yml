@@ -59,17 +59,18 @@ jobs:
           set -e
           NOTES=".github/release-notes/${TAG}.md"
           if [ ! -f "$NOTES" ]; then
-            echo "::warning title=缺少发布说明::未找到 $NOTES，改用标签名作说明"
-            NOTES=/dev/null
+            echo "::warning title=缺少发布说明::未找到 $NOTES，改用自动生成说明"
+            NOTES=""
           fi
+          # 幂等：重推标签时 GitHub 会连带删掉旧 Release，这里统一"存在则删、然后重建"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在，改为覆盖附件与说明"
-            gh release edit "$TAG" --notes-file "$NOTES" || true
-            gh release upload "$TAG" dist/*.zip --clobber
-          else
-            gh release create "$TAG" dist/*.zip \
-              --title "$TAG" \
-              --notes-file "$NOTES" \
-              --verify-tag
+            echo "Release $TAG 已存在，先删除以便重建（保留标签）"
+            gh release delete "$TAG" --yes --cleanup-tag=false
           fi
-          gh release view "$TAG" --json url,name -q '.url'
+          if [ -n "$NOTES" ]; then
+            gh release create "$TAG" dist/*.zip --title "$TAG" --notes-file "$NOTES" --verify-tag
+          else
+            gh release create "$TAG" dist/*.zip --title "$TAG" --generate-notes --verify-tag
+          fi
+          echo "--- 发布结果 ---"
+          gh release view "$TAG" --json url,name,assets -q '.url, (.assets[].name)'

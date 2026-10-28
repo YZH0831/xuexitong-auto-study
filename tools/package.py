@@ -39,7 +39,24 @@ EXCLUDE_NAMES = {"__pycache__", ".venv", ".git", "dist", "build", "node_modules"
 EXCLUDE_SUFFIX = {".pyc", ".pyo", ".log", ".zip", ".bak", ".err"}
 
 
+def _git_tracked():
+    """git 跟踪的文件集合；不在 git 仓库里（如解压后的分发包）返回 None。"""
+    if not (ROOT / ".git").exists():
+        return None
+    try:
+        r = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT,
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return None
+        return {x for x in r.stdout.split("\0") if x}
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def collect():
+    tracked = _git_tracked()
+    if tracked is None:
+        print("  ! 未检测到 git 仓库，改用扩展名/命名规则排除私人文件")
     files = []
     for f in INCLUDE_FILES:
         p = ROOT / f
@@ -61,6 +78,13 @@ def collect():
             # 临时/调试文件（_foo.py、_脚本.sh）跳过，但 __init__.py / __main__.py 必须保留
             if p.name.startswith("_") and not p.name.startswith("__"):
                 continue
+            # 私人笔记（.gitignore 里的 *.local.md 等）：不进包，双保险
+            if ".local." in p.name or p.suffix in {".local", ".private"}:
+                continue
+            # 有 git 时以「被跟踪」为准，.gitignore 里的私人文件自动排除
+            if tracked is not None:
+                if p.relative_to(ROOT).as_posix() not in tracked:
+                    continue
             files.append(p)
     return sorted(set(files))
 
@@ -105,9 +129,14 @@ def main():
         for text in ("cxlab/__init__.py", "main.py", "requirements.txt", "config.example.yaml"):
             if not any(n.endswith("/" + text) for n in names):
                 missing.append(text)
+        # 私人笔记绝不能进包（曾因 rglob 绕过 .gitignore 而泄露开发日志）
+        leaked = [n for n in names if ".local." in n or "DEVLOG" in n]
     if missing:
         print(f"✘ 自检失败：分发包缺文件 {missing}")
         return 2
+    if leaked:
+        print(f"✘ 自检失败：分发包含私人笔记 {leaked}")
+        return 3
 
     print(f"③ 完成：{out}")
     print(f"   原始 {total/1024/1024:.1f} MB → 压缩后 {out.stat().st_size/1024/1024:.1f} MB")

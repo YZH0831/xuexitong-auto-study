@@ -248,6 +248,10 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
     no_dur = 0
     paused_cnt = 0
     hidden_ticks = 0
+    last_alive = 0.0
+    # 每 45 秒动一次鼠标：鼠标长时间静止时平台可能判为挂机、不计观看时长
+    # （实测纯视频章节全部复核失败，而带测验的章节因做题时鼠标在动反而成功）
+    alive_every = 45.0
 
     while True:
         # 会话健康检查：掉线/断网时由 runner 负责自动重登录或等待恢复
@@ -283,6 +287,22 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
                 hidden_ticks = 0
         except Exception:  # noqa: BLE001
             pass
+
+        # 拟人保活：播放期间定期小幅移动鼠标（不点击，避免把视频点暂停），
+        # 让平台看到"人还在看"，避免防挂机机制把这段时间判为无效观看。
+        if elapsed - last_alive >= alive_every:
+            last_alive = elapsed
+            try:
+                box = page.viewport_size or {"width": 1280, "height": 720}
+                w = max(1, box["width"] - 320)
+                h = max(1, box["height"] - 320)
+                page.mouse.move(
+                    160 + (int(elapsed) * 37) % w,
+                    160 + (int(elapsed) * 61) % h,
+                    steps=10,
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
         dur = state.get("dur", 0)
         ct = state.get("ct", 0)
@@ -334,7 +354,23 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
             log.info(f"  进度 {ct:.0f}/{dur:.0f}s ({ct/dur*100:.0f}%)")
         time.sleep(poll)
 
-    # 给平台一点时间登记完成状态
+    # 给平台一点时间登记完成状态。
+    # 实测：纯视频章节播完立刻切走，平台常判「仍显示 1 个未完成」；
+    # 而带测验的章节因为多停留了几分钟做题，视频反而被登记上了。
+    # 因此这里主动多停留 ~20 秒并保持页面活跃（鼠标微动 + 轻微滚动），
+    # 让播放器的最后一次心跳/上报有机会送达。
     page.wait_for_timeout(6000)
+    try:
+        for i in range(3):
+            box = page.viewport_size or {"width": 1280, "height": 720}
+            page.mouse.move(
+                120 + (i * 97) % max(1, box["width"] - 240),
+                120 + (i * 61) % max(1, box["height"] - 240),
+                steps=10,
+            )
+            page.evaluate("(d) => window.scrollBy(0, d)", 6 if i % 2 == 0 else -6)
+            page.wait_for_timeout(4500)
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"播放后保活异常（忽略）: {str(exc)[:60]}")
     popup.tick(page)
     return "done", f"播放完成 rate={rate}x"

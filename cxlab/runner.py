@@ -651,6 +651,62 @@ class Runner:
     }
     """
 
+    # 章节内多页内容（页签是纯数字 1 / 2 / 3，不带"视频/测验"文字）
+    # 实测：这类章节 platform 端 totalcount=2，只做第 1 页的视频会永远停在 1/2
+    JS_PAGE_TABS = r"""
+    () => {
+      const lis = Array.from(document.querySelectorAll('.prev_list li, #prev_list li'));
+      const vis = lis.filter(e => e.offsetParent !== null);
+      return vis.map((e, i) => ({
+        idx: i,
+        label: (e.innerText || '').replace(/\s+/g, '').slice(0, 4),
+        active: /active/.test(e.className || '')
+      }));
+    }
+    """
+
+    def _page_tabs(self, page):
+        """章节内多页签信息；只有 2 页以上才返回（单页返回空列表）。"""
+        for f in course_mod.all_frames(page):
+            try:
+                meta = f.evaluate(self.JS_PAGE_TABS) or []
+            except Exception:  # noqa: BLE001
+                continue
+            if len(meta) > 1:
+                return meta
+        return []
+
+    def _goto_page(self, page, idx):
+        """切到章节内第 idx 页（0 基），返回切换后的内容帧。"""
+        clicked = False
+        for f in course_mod.all_frames(page):
+            try:
+                els = [e for e in f.query_selector_all(".prev_list li, #prev_list li") if e.is_visible()]
+            except Exception:  # noqa: BLE001
+                continue
+            if len(els) > 1 and idx < len(els):
+                try:
+                    els[idx].click(timeout=5000)
+                    clicked = True
+                except Exception:  # noqa: BLE001
+                    try:
+                        self.session.click_capture(page, els[idx], wait_s=6)
+                        clicked = True
+                    except Exception as exc:  # noqa: BLE001
+                        self.log.warning(f"     切换到第 {idx + 1} 页失败: {str(exc)[:50]}")
+                if clicked:
+                    page.wait_for_timeout(4000)
+                    self.popup.tick(page)
+                break
+        if not clicked:
+            return None
+        for _ in range(6):
+            cards = course_mod.find_content_frame(page)
+            if cards is not None:
+                return cards
+            page.wait_for_timeout(800)
+        return None
+
     def _play_video_here(self, page, ch):
         """在当前标签页里播视频（新版知识点页的视频在 knowledge/cards 帧内）。"""
         self.task_count += 1
@@ -779,6 +835,59 @@ class Runner:
                                 rate_used = float(m_v.group(1))
                     else:
                         log.info(f"  页内任务点类型为 {t_v}，未做额外处理")
+        elif (pm := self._page_tabs(page)) and not tabs:
+            # ①-B 章节内多页（页签是纯数字，无"视频/测验"文字）→ 逐页处理
+            # 这类章节平台端 totalcount 可能为 2，只做第 1 页会永远停在 1/2
+            # 注意：切页后内容帧里可能暂时看不到视频，card_type 会误判成 quiz，
+            # 因此这里不靠 card_type，而是「先探视频元素 → 再找答题入口 → 最后按类型兜底」
+            log.info(f"  发现 {len(pm)} 个内容页签（纯数字）→ 逐页处理")
+            handled = 0
+            last = ("manual", "多页均未处理")
+            for idx in range(len(pm)):
+                p_i, cards_i = self._open_chapter(ch)
+                if idx > 0:
+                    if self._goto_page(p_i, idx) is None:
+                        log.warning(f"   [第 {idx + 1} 页] 切换失败或内容帧未就绪 → 跳过")
+                        continue
+                    cards_i = course_mod.find_content_frame(p_i)
+                if self._chapter_locked(p_i):
+                    log.info(f"   [第 {idx + 1} 页] 暂未开放 → 跳过")
+                    continue
+
+                _, vel = video_mod.find_video_element(p_i, timeout_s=10)
+                if vel is not None:
+                    log.info(f"   [第 {idx + 1}/{len(pm)} 页] 检测到视频 → 播放")
+                    s_i, n_i = self._play_video_here(p_i, ch)
+                else:
+                    entry_i = self._find_quiz_entry(p_i)
+                    if entry_i is not None:
+                        log.info(f"   [第 {idx + 1}/{len(pm)} 页] 检测到答题入口 → 处理")
+                        qp = p_i
+                        try:
+                            qp, _ = self.session.click_capture(p_i, entry_i, wait_s=12)
+                            qp.wait_for_timeout(3000)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning(f"     打开答题入口失败: {str(exc)[:60]}")
+                        s_i, n_i = self._handle_quiz(qp, ch)
+                    elif cards_i is not None:
+                        t_i = course_mod.card_type(cards_i)
+                        log.info(f"   [第 {idx + 1}/{len(pm)} 页] 无视频/答题入口，类型 {t_i} → 处理")
+                        s_i, n_i = self._handle_card(p_i, cards_i, t_i, ch)
+                    else:
+                        log.info(f"   [第 {idx + 1}/{len(pm)} 页] 未识别到可处理内容 → 跳过")
+                        continue
+                log.info(f"     → {s_i} | {str(n_i)[:70]}")
+                last = (s_i, n_i)
+                if s_i in ("done", "failed"):
+                    handled += 1
+                # 逐页处理时只做一次快速复核（还有下一页要做，不必每页白等 3 分钟）；
+                # 全部页处理完后，外层还会再做一次完整复核。
+                hint_i = self._verify_chapter(ch, rounds=1)
+                if isinstance(hint_i, int) and hint_i == 0:
+                    log.info("     平台已标记完成，后续页签无需处理")
+                    break
+            status, note = last[0], f"多页处理 {handled}/{len(pm)} 页；{last[1]}"
+            ctype = "multi"
         elif (entry := self._find_quiz_entry(page)) is not None:
             log.info("  页内有测验/作业入口 → 优先处理（该课任务点可能是测验而非视频）")
             self.task_count += 1
@@ -988,19 +1097,50 @@ class Runner:
                     continue
         return "manual", "未找到答题入口，请人工打开该章节测验"
 
-    def _verify_chapter(self, ch):
+    def _wait_keeping_alive(self, seconds):
+        """等待期间保持页面活跃。
+
+        平台按心跳累计观看时长、并按会话状态登记任务点；页面长时间无人操作时
+        上报容易缺漏（实测纯视频章节播完后 40 秒内仍显示未完成）。
+        这里用鼠标微动 + 轻微滚动模拟"人还在看"，且滚动幅度很小，不会把视频拖离可视区。
+        """
+        page = self.session.page
+        end = time.time() + max(1, seconds)
+        i = 0
+        while time.time() < end:
+            remain = end - time.time()
+            time.sleep(max(1.0, min(6.0, remain)))
+            i += 1
+            try:
+                box = page.viewport_size or {"width": 1280, "height": 720}
+                page.mouse.move(
+                    140 + (i * 89) % max(1, box["width"] - 280),
+                    140 + (i * 57) % max(1, box["height"] - 280),
+                    steps=8,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                page.evaluate("(d) => window.scrollBy(0, d)", 5 if i % 2 else -5)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _verify_chapter(self, ch, rounds=5):
         """复核知识点状态。
 
         优先用平台接口（准确），并做延迟重试——实测视频播完后平台登记有延迟，
         只查一次会误判为"未完成"；页面 DOM 标记同样可能滞后，仅作兜底。
+        rounds=1 时只查一次（多页章节逐页处理时用，避免每页白等）。
         返回：0=已完成 / >0=未完成数 / -1=无任务点 / None=无法判定
         """
         log = self.log
-        # 1) 接口复核：最多 3 次，间隔递增（0s / 15s / 25s）
-        for attempt, delay in enumerate((0, 15, 25)):
+        delays = (0, 15, 25, 60, 90)[: max(1, int(rounds))]
+        # 1) 接口复核：失败时逐步延长等待（0/15/25 秒快速判定，之后 60/90 秒兜底）
+        #    实测纯视频章节的登记可达 2 分钟以上；成功的通常第一次就返回，不额外耗时。
+        for attempt, delay in enumerate(delays):
             if delay and attempt:
-                log.info(f"  平台登记可能延迟，{delay} 秒后再次复核…")
-                time.sleep(delay)
+                log.info(f"  平台登记可能延迟，{delay} 秒后再次复核（保持页面活跃）…")
+                self._wait_keeping_alive(delay)
             try:
                 st = course_mod.chapter_status(self.session, self.course, [ch.id], log)
             except Exception:  # noqa: BLE001
@@ -1016,8 +1156,8 @@ class Runner:
             course_mod.update_chapter_hint(ch.id, unfinish)
             if unfinish == 0:
                 return 0
-            if attempt >= 2:
-                return unfinish          # 三次都未完成 → 确实没完成
+            if attempt >= len(delays) - 1:
+                return unfinish          # 全部轮次都未完成 → 确实没完成
         # 2) DOM 兜底（可能滞后）
         try:
             page = self._tree_page()

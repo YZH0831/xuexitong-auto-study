@@ -21,6 +21,9 @@ if /i "%~1"=="tiku"  goto settiku
 if /i "%~1"=="doctor" goto doctor
 
 :menu
+set "VER="
+if exist "VERSION" set /p VER=<VERSION
+if not defined VER set "VER=1.0.0"
 set "LLMSTAT="
 set "LLMTIP="
 for /f "delims=" %%S in ('"%PY%" tools\set_key_gui.py --status-line 2^>nul') do (
@@ -29,16 +32,16 @@ for /f "delims=" %%S in ('"%PY%" tools\set_key_gui.py --status-line 2^>nul') do 
 if not defined LLMSTAT set "LLMSTAT=[未配置] 按 K 填写密钥"
 cls
 echo ============================================================
-echo                学习通自动化助手  v1.0.0
+echo                学习通自动化助手  v%VER%
 echo ============================================================
 echo    大模型答题：%LLMSTAT%
 if defined LLMTIP echo                %LLMTIP%
 echo ------------------------------------------------------------
 echo    [1] 试运行      ：只扫描章节和任务点，不真正学习
-echo    [2] 正式运行    ：自动学习（已完成的任务点自动跳过）
+echo    [2] 正式运行    ：全部课程自动学习（已完成的任务点自动跳过）
 echo    [3] 只刷视频/音频
 echo    [4] 只做测验
-echo    [5] 选择课程与课时：字母多选课程 → 选课时范围 → 确认
+echo    [5] 只跑指定课程：多选课程 → 选课时范围 → 确认（输 all 可选全部）
 echo    [6] 列出我的课程（含课程编号）
 echo    [7] 打开报告目录
 echo    [8] 编辑配置    ：课程、课时、拟人化、安全限制等

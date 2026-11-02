@@ -603,14 +603,75 @@ def _collect_courses(page):
     return items
 
 
+def _scroll_all(page):
+    """把每个 frame 滚到底，触发懒加载 / 无限滚动。"""
+    for frame in all_frames(page):
+        try:
+            frame.evaluate(
+                "() => { try { window.scrollTo(0, document.body.scrollHeight); } catch (e) {} }"
+            )
+        except Exception:  # noqa: BLE001
+            continue
+
+
+# 首页课程区被截断时的「更多 / 展开」入口（存在才点，点不到就跳过）
+MORE_ENTRY_SELECTORS = (
+    "text=更多课程",
+    "text=查看更多",
+    "#moreCourse",
+    ".more-course",
+    "a[href*='morecourse']",
+)
+
+
+def _try_expand_more(page):
+    """尝试点开「更多课程」入口。成功返回 True。"""
+    for sel in MORE_ENTRY_SELECTORS:
+        try:
+            el = page.query_selector(sel)
+            if el is None or not el.is_visible():
+                continue
+            el.click()
+            page.wait_for_timeout(1600)
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
 def _wait_cards(page, wait_s):
+    """等课程卡片渲染，并尽量取全。
+
+    旧实现「拿到第一批就 return」在首页分批渲染 / 懒加载时会漏课
+    （实测账号课程数超过首屏时只采到前 8 门）。现改为：
+    滚动触发加载 → 数量连续两次不变才认定渲染完毕。
+    """
     deadline = time.time() + wait_s
+    best = []
+    last_len = -1
+    stable = 0
+    tried_expand = False
     while time.time() < deadline:
         cards = _collect_courses(page)
-        if cards:
-            return cards
-        page.wait_for_timeout(1500)
-    return []
+        if len(cards) > len(best):
+            best = cards
+        if best:
+            _scroll_all(page)
+            # 首屏常见上限恰好是 8 门，命中说明可能被截断，尝试展开一次
+            if not tried_expand and len(best) <= 8:
+                tried_expand = True
+                if _try_expand_more(page):
+                    page.wait_for_timeout(1200)
+                    continue
+            if len(best) == last_len:
+                stable += 1
+                if stable >= 2:
+                    return best
+            else:
+                stable = 0
+        last_len = len(best)
+        page.wait_for_timeout(1200)
+    return best
 
 
 def list_courses(session, cfg, log, wait_s=25):
@@ -837,7 +898,10 @@ def card_type(cards_frame):
         pass
     blob = " ".join(subs) + " " + html[:5000]
     low = blob.lower()
-    if "modules/video" in low or "ans-insertvideo" in low:
+    if ("modules/video" in low or "ans-insertvideo" in low
+            or "modules/live" in low or "insertlive" in low):
+        # 直播回放（ananas/modules/live）与视频同源，播放器也是 video.js；
+        # 不归入这里会被当成「文档」，滚动几下永远不会完成
         return "video"
     if "modules/document" in low or "insertdoc" in low or "pdfjs" in low or "office" in low:
         return "document"

@@ -631,24 +631,35 @@ CONFIRM_SELECTORS = [
 
 
 def _search_roots(page):
+    """确认弹窗可能出现在当前 frame、父 page，或 page 下的其它 frame 里。"""
     roots = [page]
     try:
         parent = getattr(page, "page", None)
         if parent is not None and parent is not page:
             roots.append(parent)
+            for fr in _containers(parent):
+                if fr is not page:
+                    roots.append(fr)
     except Exception:  # noqa: BLE001
         pass
     return roots
 
 
 def _submit_button(page):
-    for sel in SUBMIT_SELECTORS:
-        try:
-            el = page.query_selector(sel)
-            if el is not None and el.is_visible():
-                return el
-        except Exception:  # noqa: BLE001
-            continue
+    """找提交按钮。
+
+    坑：学习通答题页的题目与按钮常在 iframe（ans-attach-ct 等）里，
+    只 query 主 page 会永远找不到 → 表现为「题目做完了但没有提交按钮，一直干等」。
+    因此必须遍历所有 frame。
+    """
+    for root in _containers(page):
+        for sel in SUBMIT_SELECTORS:
+            try:
+                el = root.query_selector(sel)
+                if el is not None and el.is_visible():
+                    return el
+            except Exception:  # noqa: BLE001
+                continue
     return None
 
 
@@ -694,8 +705,23 @@ def submit_quiz(page, log, humanizer=None):
     """
     btn = _submit_button(page)
     if btn is None:
-        log.warning("  未找到提交按钮（可能已经提交过）")
-        return False
+        # 按钮可能还在渲染，或在折叠区/页面下方 → 滚一下再看几次
+        _p = getattr(page, "page", page)
+        for _ in range(3):
+            _wait(page, 1500)
+            try:
+                _p.mouse.wheel(0, 1500)
+            except Exception:  # noqa: BLE001
+                pass
+            btn = _submit_button(page)
+            if btn is not None:
+                log.info("  滚动后找到提交按钮")
+                break
+    if btn is None:
+        # 返回 None 表示「压根没有提交按钮」→ 调用方应直接跳过本节，
+        # 不要再去等 3 分钟复核（用户反馈：找不到按钮就别干等）
+        log.warning("  重试 3 次仍未找到提交按钮 → 跳过本节，直接进入下一节")
+        return None
     try:
         if humanizer is not None:
             humanizer.click(getattr(page, "page", page), btn, timeout=5000)
@@ -881,8 +907,11 @@ def run_quiz(session, cfg, log, page, popup, bank, online=None, humanizer=None):
         log.warning("未自动解析到题目（本章测验可能采用字体混淆或自定义组件）")
         log.warning("→ 请在浏览器窗口里手动完成本章测验，完成后在控制台回车，程序会自动提交")
         wait_manual_answer(log, int(cfg.quiz.pause_timeout_s), [])
-        if not submit_quiz(page, log, humanizer):
-            return "manual", "未找到提交按钮，请人工提交"
+        _sub = submit_quiz(page, log, humanizer)
+        if _sub is None:
+            return "skipped", "未找到提交按钮 → 跳过本节，直接进入下一节"
+        if not _sub:
+            return "manual", "点击提交失败，请人工提交"
         score = read_result(page, [], bank, log)
         note = "已提交（人工作答）"
         if score is not None:
@@ -1053,8 +1082,11 @@ def run_quiz(session, cfg, log, page, popup, bank, online=None, humanizer=None):
             return "manual", f"{len(unknown)} 题未作答，按配置跳过提交"
 
     submitted = submit_quiz(page, log, humanizer)
+    if submitted is None:
+        # 页面上根本没有提交按钮（不是点了失败）→ 跳过本节，不进入复核等待
+        return "skipped", "未找到提交按钮 → 跳过本节，直接进入下一节"
     if not submitted:
-        return "failed", "未找到提交按钮，需人工提交"
+        return "failed", "点击提交失败，需人工提交"
     score = read_result(page, questions, bank, log)
     note = "已提交"
     if score is not None:

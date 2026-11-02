@@ -707,6 +707,87 @@ class Runner:
             page.wait_for_timeout(800)
         return None
 
+    def _chapter_title(self, page):
+        """当前知识点标题，用于区分「下一节」是翻内容块还是跳知识点。"""
+        for f in course_mod.all_frames(page):
+            try:
+                t = f.evaluate(
+                    "() => { const e = document.querySelector('.prev_title');"
+                    " return e ? (e.innerText || '').trim() : ''; }"
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if t:
+                return str(t).strip()
+        return ""
+
+    def _click_next_block(self, page):
+        """点「下一节」按钮（章节内切换内容块）；点了返回 True。"""
+        for f in course_mod.all_frames(page):
+            for sel in ("div.prev_next.next", "a.prev_next.next", ".jb_btn.next"):
+                try:
+                    el = f.query_selector(sel)
+                except Exception:  # noqa: BLE001
+                    continue
+                if el is None:
+                    continue
+                try:
+                    if not el.is_visible():
+                        continue
+                    if "上一节" in ((el.inner_text() or "").strip()):
+                        continue
+                    el.click(timeout=4000)
+                except Exception:  # noqa: BLE001
+                    continue
+                page.wait_for_timeout(3500)
+                self.popup.tick(page)
+                return True
+        return False
+
+    def _continue_next_block(self, ch, page, max_steps=3):
+        """做完测验/视频后用「下一节」继续本章节剩余内容块。
+
+        实测「1.1 导论」：页内先给了答题入口，程序做完 3 题后就在原地复核，
+        本知识点后面还有内容却没继续——用户看到的是"答完题卡住不动"。
+        部分章节的内容块不用 1/2 页签，只能靠「下一节」切换。
+        返回是否处理到了新内容。
+        """
+        log = self.log
+        did = False
+        for step in range(1, max_steps + 1):
+            before = self._chapter_title(page)
+            if not self._click_next_block(page):
+                return did
+            after = self._chapter_title(page)
+            if before and after and before != after:
+                log.info(f"  「下一节」跳到了其它知识点（{after}）→ 回到原章节继续")
+                self._open_chapter(ch)
+                return did
+            cards = course_mod.find_content_frame(page)
+            if cards is None:
+                return did
+            entry = self._find_quiz_entry(page)
+            if entry is not None:
+                log.info(f"  「下一节」第 {step} 块：有答题入口 → 处理")
+                qp = page
+                try:
+                    qp, _ = self.session.click_capture(page, entry, wait_s=12)
+                    qp.wait_for_timeout(3000)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(f"     打开答题入口失败: {str(exc)[:60]}")
+                s, n = self._handle_quiz(qp, ch)
+            else:
+                t = course_mod.card_type(cards)
+                log.info(f"  「下一节」第 {step} 块：类型 {t} → 处理")
+                s, n = self._handle_card(page, cards, t, ch)
+            log.info(f"     → {s} | {str(n)[:70]}")
+            if s in ("done", "failed"):
+                did = True
+            h = self._verify_chapter(ch, rounds=1)
+            if isinstance(h, int) and h == 0:
+                return True
+        return did
+
     def _play_video_here(self, page, ch):
         """在当前标签页里播视频（新版知识点页的视频在 knowledge/cards 帧内）。"""
         self.task_count += 1
@@ -888,6 +969,32 @@ class Runner:
                     break
             status, note = last[0], f"多页处理 {handled}/{len(pm)} 页；{last[1]}"
             ctype = "multi"
+        elif cards is not None and course_mod.card_type(cards) in ("video", "document"):
+            # ②-A 视频/文档优先。原实现把「测验入口」排在前面，导致本页面既
+            #     有视频又有作业入口时只做了作业、视频永远不播（用户反馈 1.1 导论）。
+            ctype = course_mod.card_type(cards)
+            status, note = self._handle_card(page, cards, ctype, ch)
+            m = re.search(r"rate=([\d.]+)x", note or "")
+            if m:
+                rate_used = float(m.group(1))
+            # 视频看完后，本节若还有测验/作业任务点，补做一次
+            # （占位章节直接跳过，不去等那 3 分钟复核）
+            h_v = self._verify_chapter(ch, rounds=1) if status != "skipped" else None
+            if isinstance(h_v, int) and h_v > 0:
+                entry_v = self._find_quiz_entry(page)
+                if entry_v is not None:
+                    log.info(f"  视频完成后仍有 {h_v} 个任务点未完成 → 补做本章节测验/作业")
+                    self.task_count += 1
+                    self.humanizer.scroll(page)
+                    qpage = page
+                    try:
+                        qpage, _ = self.session.click_capture(page, entry_v, wait_s=12)
+                        qpage.wait_for_timeout(3000)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(f"  点击测验入口失败: {str(exc)[:70]}")
+                    s_q, n_q = self._handle_quiz(qpage, ch)
+                    if s_q != "skipped":
+                        ctype, status, note = "quiz", s_q, f"{note}；另：{n_q}"
         elif (entry := self._find_quiz_entry(page)) is not None:
             log.info("  页内有测验/作业入口 → 优先处理（该课任务点可能是测验而非视频）")
             self.task_count += 1
@@ -900,19 +1007,25 @@ class Runner:
                 log.warning(f"  点击测验入口失败: {str(exc)[:70]}")
             status, note = self._handle_quiz(qpage, ch)
             ctype = "quiz"
-            h0 = self._verify_chapter(ch)
+            # 快速判断即可：以前这里用完整 5 轮复核（约 3 分钟），做完题后干等，
+            # 用户看到的现象就是「答完题程序不动了」。
+            h0 = self._verify_chapter(ch, rounds=1)
             if isinstance(h0, int) and h0 > 0:
-                log.info(f"  测验后仍有 {h0} 个任务点未完成 → 继续处理页内视频/文档")
-                page2, cards2 = self._open_chapter(ch)
-                if cards2 is not None:
-                    t2 = course_mod.card_type(cards2)
-                    if t2 in ("video", "document"):
-                        s2, n2 = self._handle_card(page2, cards2, t2, ch)
-                        if s2 != "skipped":
-                            ctype, status, note = t2, s2, f"{note}；另：{n2}"
-                            m = re.search(r"rate=([\d.]+)x", n2 or "")
-                            if m:
-                                rate_used = float(m.group(1))
+                log.info(f"  测验后仍有 {h0} 个任务点未完成 → 用「下一节」继续本章节剩余内容")
+                if self._continue_next_block(ch, page, 3):
+                    status, note = "done", f"{note}；已用「下一节」继续后续内容"
+                else:
+                    log.info("  「下一节」未带来新内容 → 退回处理页内视频/文档")
+                    page2, cards2 = self._open_chapter(ch)
+                    if cards2 is not None:
+                        t2 = course_mod.card_type(cards2)
+                        if t2 in ("video", "document"):
+                            s2, n2 = self._handle_card(page2, cards2, t2, ch)
+                            if s2 != "skipped":
+                                ctype, status, note = t2, s2, f"{note}；另：{n2}"
+                                m = re.search(r"rate=([\d.]+)x", n2 or "")
+                                if m:
+                                    rate_used = float(m.group(1))
         elif cards is not None:
             ctype = course_mod.card_type(cards)
             status, note = self._handle_card(page, cards, ctype, ch)
@@ -929,7 +1042,12 @@ class Runner:
             course_mod.dump_structure(page, dump, log)
             status, note = "manual", f"未找到任务点容器（结构已导出 {dump}）"
 
-        hint = self._verify_chapter(ch)
+        if status == "skipped":
+            # 找不到提交按钮 / 章节无需处理 → 不进入 3 分钟复核，直接进入下一节
+            hint = None
+            log.info("  跳过平台复核，直接进入下一节")
+        else:
+            hint = self._verify_chapter(ch)
 
         # 兜底：用了倍速但平台没登记（实测平台按真实时间核验）→ 用 1 倍速重播一次
         if rate_used > 1.0 and isinstance(hint, int) and hint > 0:
@@ -989,11 +1107,48 @@ class Runner:
             return True
         return False
 
+    # 占位提示关键词：内容帧只有这类文字，说明任务点还没放内容
+    PLACEHOLDER_KW = ("敬请期待", "即将上线", "即将推送", "暂未开放",
+                      "尚未开始", "待上传", "正在准备", "稍后开放")
+
+    def _placeholder_note(self, cards):
+        """任务点若是「敬请期待」类占位页，返回提示文字；否则返回 None。
+
+        实测：「2.1 专题讲座直播」内容帧只有一句
+        「讲座直播将于9月和10月推送，敬请期待，支持回看。」——没有视频/文档/测验，
+        但平台照样算 1 个任务点，程序会白播 + 白等 3 分钟复核，永远完不成。
+        注意：占位页的 iframe 本身就是 modules/live，所以 live 不能当「有实质内容」的证据。
+        """
+        try:
+            text = (cards.evaluate(
+                "() => (document.body ? document.body.innerText : '')") or "").strip()
+            html = (cards.evaluate(
+                "() => (document.body ? document.body.innerHTML : '')") or "").lower()
+        except Exception:  # noqa: BLE001
+            return None
+        if not text or len(text) > 200:
+            return None
+        # 有真正能学的东西就不算占位（live 除外，见上）
+        for k in ("<video", "modules/video", "modules/document", "modules/audio",
+                  "dohomework", "insertwork", "insertdoc"):
+            if k in html:
+                return None
+        for kw in self.PLACEHOLDER_KW:
+            if kw in text:
+                return text[:70]
+        if len(text) < 40:
+            return text[:70] or "(空白页)"
+        return None
+
     def _handle_card(self, page, cards, ctype, ch):
         log, cfg = self.log, self.cfg
         self.task_count += 1
         if getattr(self.args, "only", "") and ctype != self.args.only:
             return "skipped", f"被 --only={self.args.only} 过滤"
+        ph = self._placeholder_note(cards)
+        if ph:
+            log.info(f"  本章节暂无内容（{ph}）→ 跳过，不计失败")
+            return "skipped", f"页面只有提示：{ph}"
         if not self._ensure_session("任务点"):
             return "manual", "任务点处理前检测到掉线且未能恢复"
         # 拟人化：处理任务点前随机滚动页面

@@ -79,6 +79,33 @@ assert (ans, kind, prov) == ("BD", "letter", "tikuadapter"), (ans, kind, prov)
 print("[4] tikuAdapter 多选答案 OK")
 
 
+# ---------- 4b) tikuAdapter use 参数 + 单选多答案护栏 ----------
+class FakeUseAdapter(Tiku):
+    def _http(self, url, **kw):
+        assert "use=buguake" in url, url
+        return json.dumps({"answer": {"answerKeyText": "B",
+                                      "answerText": "特殊侵权责任"}})
+
+
+t = FakeUseAdapter(cfg_with([{"type": "tikuadapter", "url": "http://127.0.0.1:8060",
+                              "use": "buguake"}]), log)
+ans, kind, prov, _ = t.query("违反安全保障义务责任属于（）", OPTS, "single")
+assert (ans, kind, prov) == ("B", "letter", "tikuadapter"), (ans, kind, prov)
+
+
+class FakeMultiForSingle(Tiku):
+    def _http(self, url, **kw):
+        return json.dumps({"answer": {"answerKeyText": "BC",
+                                      "answerText": "特殊侵权责任#过错推定责任"}})
+
+
+t = FakeMultiForSingle(cfg_with([{"type": "tikuadapter", "url": "http://127.0.0.1:8060",
+                                  "use": "icodef"}]), log)
+ans, _, _, note = t.query("违反安全保障义务责任属于（）", OPTS, "single")
+assert ans is None and "未命中" in note, (ans, note)
+print("[4b] tikuAdapter use 参数 + 单选多答案拒绝 OK")
+
+
 # ---------- 5) 多选文本片段拆分对齐 ----------
 m = _tiku_text_to_letters("公平责任#连带责任", OPTS, "multi")
 assert m == "AD", m

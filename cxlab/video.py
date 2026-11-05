@@ -19,6 +19,13 @@ JS_PLAY = """
 }
 """
 
+JS_SET_RATE = """
+(el, rate) => {
+  try { el.playbackRate = rate; } catch (e) {}
+  return el.playbackRate || 1;
+}
+"""
+
 JS_STATE = """
 (el) => ({
   ct: el.currentTime || 0,
@@ -41,11 +48,20 @@ JS_INFO = """
 
 # 平台上常见的"真实学习时间"规则文案
 DURATION_RULE = re.compile(r"(累计观看|观看时长|需观看|观看满|观看时间)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(分钟|min)")
+# 只把真正“禁止倍速/快进”的措辞当倍速限制；
+# “总时长的90%”“不可拖拽”“请勿最小化”是完成比例/操作限制，不等于不能调倍速。
 NOSPEED_HINT = [
-    "禁止倍速", "不可快进", "不允许倍速", "不得快进",
-    "不可拖拽", "总时长的", "观看时长需", "不可离开", "不可最小化",
+    "禁止倍速", "不可快进", "不允许倍速", "不得快进", "禁止快进",
+    "不可加速", "不能加速", "必须1倍速", "必须 1 倍速",
 ]
-PLAYER_URL_HINTS = ("modules/video", "modules/audio")   # 音频任务用 video.js 播 m4a，走同一套逻辑
+# “观看时长达到总时长的90%” / “观看进度需达到 90%” / “完成进度 90%”
+COMPLETION_RULE = re.compile(
+    r"(?:观看时长|观看进度|学习进度|完成进度)[^。；\n]{0,40}?(\d{1,3})\s*%"
+    r"|(?:达到|需|满|≥|大于等于)[^。；\n]{0,12}?(\d{1,3})\s*%[^。；\n]{0,20}?(?:完成|任务点)"
+)
+PLAYER_URL_HINTS = ("modules/video", "modules/audio", "modules/live")
+# 从高到低探测；播放器拒绝时自动降到下一档。
+SPEED_CANDIDATES = (3.0, 2.5, 2.0, 1.75, 1.5, 1.25)
 
 PLAY_SELECTORS = [
     ".vjs-big-play-button",
@@ -188,6 +204,63 @@ def detect_no_speed(page):
     return detect_rules(page)[1]
 
 
+def parse_completion_ratio(text, default=1.0):
+    """从页面文案解析完成线：如“观看时长达到总时长的90%” → 0.9。
+
+    取规则句中的最大百分比；排除“当前观看进度为 0%/100%”这类实时进度。
+    """
+    text = str(text or "")
+    ratios = []
+    for m in COMPLETION_RULE.finditer(text):
+        prefix = text[max(0, m.start() - 10):m.start()]
+        if "当前" in prefix or "已观看" in prefix or "观看了" in prefix:
+            continue
+        for raw in m.groups():
+            if raw:
+                try:
+                    n = int(raw)
+                except ValueError:
+                    continue
+                if 1 <= n <= 100:
+                    ratios.append(n)
+    return max(ratios) / 100.0 if ratios else default
+
+
+def detect_completion_ratio(page, default=1.0):
+    """遍历所有帧，读取本视频/直播的完成百分比；没有明确文案返回 default。"""
+    best = default
+    for frame in page.frames:
+        try:
+            text = frame.evaluate(JS_GET_TEXT) or ""
+        except Exception:  # noqa: BLE001
+            continue
+        if not text:
+            continue
+        ratio = parse_completion_ratio(text, default=best)
+        if ratio is not None and (best is None or ratio > best):
+            best = ratio
+    return best
+
+
+def probe_playback_rate(el, max_rate=3.0):
+    """从高到低探测播放器实际支持的倍速，返回最高可用档位。"""
+    try:
+        ceiling = max(1.0, float(max_rate))
+    except (TypeError, ValueError):
+        ceiling = 3.0
+    candidates = [r for r in SPEED_CANDIDATES if r <= ceiling + 1e-6]
+    if not candidates:
+        candidates = [1.0]
+    for rate in candidates:
+        try:
+            actual = float(el.evaluate(JS_SET_RATE, rate) or 1.0)
+        except Exception:  # noqa: BLE001
+            continue
+        if actual + 0.01 >= rate:
+            return rate
+    return 1.0
+
+
 def _kick(el, rate, frame, log):
     """尝试开始播放：先调 play()，若仍暂停则点播放器按钮。"""
     try:
@@ -209,11 +282,14 @@ def _kick(el, rate, frame, log):
         pass
 
 
-def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=None):
+def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=None,
+               completion_ratio=None):
     """播放当前页视频，返回 (status, note)。
 
     force_rate: 强制倍速（用于"倍速未被登记 → 用 1x 重播"的兜底）。
     keepalive : 回调（每次轮询调用），返回 False 表示会话中断需停止播放。
+    completion_ratio: 外层页面（如直播卡片）要求的完成比例；直播跳到新标签后
+                      目标页往往看不到这段规则，需要从原页面带过来。
     """
     vcfg = cfg.video
 
@@ -227,16 +303,29 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
         return "manual", "未找到可用的视频播放器元素（可能需要人工点击播放）"
 
     rule_min, no_speed = detect_rules(page)       # 单次遍历取回两种规则
+    detected = detect_completion_ratio(page, default=None)
+    if completion_ratio is not None:
+        completion = max(detected or 0.0, float(completion_ratio))
+    else:
+        completion = detected if detected is not None else 1.0
     force_1x = bool(vcfg.duration_required_1x) and (rule_min is not None or no_speed)
     rate = 1.0 if force_1x else float(vcfg.speed)
     if force_rate is not None:
         rate = float(force_rate)
-    if rule_min:
-        log.info(f"  平台要求累计观看 {rule_min} 分钟 → 强制 1 倍速真实播放")
-    elif force_1x:
-        log.info("  检测到平台限制（需真实观看/禁止倍速）→ 强制 1 倍速")
+    if force_1x:
+        log.info("  检测到平台明确限制倍速 → 本次按 1 倍速播放")
+    elif rate > 1.0:
+        actual = probe_playback_rate(el, rate)
+        if actual + 0.01 < rate:
+            log.info(f"  播放器只接受 {actual:g}x（请求 {rate:g}x）→ 采用实际倍速")
+            rate = actual
+        else:
+            log.info(f"  检测到播放器可调倍速 → 采用 {rate:g}x")
     else:
-        log.info(f"  播放倍速: {rate}x")
+        log.info(f"  播放倍速: {rate:g}x")
+    if rule_min:
+        log.info(f"  平台要求累计观看 {rule_min} 分钟")
+    log.info(f"  完成线: 观看 {completion:.0%} 即视为完成")
 
     _kick(el, rate, frame, log)
 
@@ -307,8 +396,13 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
         dur = state.get("dur", 0)
         ct = state.get("ct", 0)
 
-        if state.get("ended") or (dur > 0 and ct >= dur - 0.4):
-            log.info(f"  播放完成（用时 {elapsed/60:.1f} 分钟）")
+        if state.get("ended") or (
+                dur > 0 and ct >= dur * completion - 0.4):
+            if dur > 0 and ct < dur - 0.5:
+                log.info(f"  已达到完成线 {completion:.0%}（{ct:.0f}/{dur:.0f}s，"
+                         f"用时 {elapsed/60:.1f} 分钟）")
+            else:
+                log.info(f"  播放完成（用时 {elapsed/60:.1f} 分钟）")
             break
 
         if dur <= 0:
@@ -351,7 +445,8 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
             return "failed", f"播放超时（{vcfg.timeout_per_video_min} 分钟），进度 {ct:.0f}s"
 
         if int(elapsed) % 60 < poll and dur > 0:
-            log.info(f"  进度 {ct:.0f}/{dur:.0f}s ({ct/dur*100:.0f}%)")
+            log.info(f"  进度 {ct:.0f}/{dur:.0f}s ({ct/dur*100:.0f}%)"
+                     f" · 完成线 {completion:.0%}")
         time.sleep(poll)
 
     # 给平台一点时间登记完成状态。

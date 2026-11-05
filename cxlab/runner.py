@@ -41,6 +41,7 @@ class Runner:
         self.task_count = 0
         self.start_ts = 0.0
         self.stop_reason = ""
+        self.exit_code = 0
         # 平台进度（以接口为准，供日志与报告对照）
         self.platform_done = 0
         self.platform_total = 0
@@ -49,6 +50,7 @@ class Runner:
         self.failed_this_run = []    # 本次失败/需人工的标题
         self.failed_chapters = []    # 失败重试队列（本章节对象）
         self._chapters_cache = []
+        self._submit_blocked_ids = set()  # 提交被平台拦截的章节：本 run 不再自动重提
         # 会话健康 / 掉线自愈
         self._last_probe = 0.0
         self._relogin_times = []
@@ -81,7 +83,8 @@ class Runner:
         try:
             if not login_mod.ensure_login(self.session, cfg, log):
                 self.report.add("登录", "账号登录", "failed", "登录失败或超时，请检查账号/网络后重试")
-                return
+                self.exit_code = 1
+                return self.exit_code
             log.info(f"题库条目数: {self.bank.size}")
             if getattr(self.args, "list_courses", False):
                 cards = course_mod.list_courses(self.session, cfg, log)
@@ -144,10 +147,12 @@ class Runner:
                     self.process_one_course()
                 except RiskControlStop as exc:
                     self.stop_reason = str(exc)
+                    self.exit_code = 2
                     log.error(f"触发风控保护，停止后续课程：{exc}")
                     self.report.add(course.name, "风控中止", "manual", str(exc)[:100])
                     break
                 except Exception as exc:  # noqa: BLE001
+                    self.exit_code = 1
                     log.exception(f"课程 [{course.name}] 处理异常: {exc}")
                     self.report.add(course.name, "课程整体", "failed", str(exc)[:120])
                 finally:
@@ -160,12 +165,15 @@ class Runner:
                     except Exception:  # noqa: BLE001
                         pass
         except KeyboardInterrupt:
+            self.exit_code = 130
             log.warning("用户中断运行")
         except RiskControlStop as exc:
+            self.exit_code = 2
             log.error(f"触发风控保护，已停止：{exc}")
             if self.report is not None:
                 self.report.add("全局", "风控中止", "manual", str(exc)[:120])
         except Exception as exc:  # noqa: BLE001
+            self.exit_code = 1
             log.exception(f"运行异常: {exc}")
             if self.report is not None:
                 self.report.add("全局", "运行异常", "failed", str(exc)[:120])
@@ -204,6 +212,7 @@ class Runner:
             if self.session is not None:
                 self.session.close()
             log.info("运行结束")
+        return self.exit_code
 
     # ---------------- 单门课程 ----------------
     def process_one_course(self):
@@ -216,6 +225,18 @@ class Runner:
             homework_mod.run_homework(self.session, self.cfg, self.log, self.popup, self.report)
 
     # ---------------- 平台进度（权威口径） ----------------
+    @staticmethod
+    def _task_counts(status_map):
+        """汇总接口的任务点数量，而不是把每个知识点误算成一个任务点。"""
+        done = total = 0
+        for value in status_map.values():
+            count = int(value.get("total", 0) or 0)
+            unfinished = int(value.get("unfinish", 0) or 0)
+            finished = int(value.get("finish", max(0, count - unfinished)) or 0)
+            total += count
+            done += max(0, min(count, finished))
+        return done, total
+
     def _refresh_platform_progress(self, chapters, quiet=False):
         """用接口刷新"平台已完成/总任务点"，这是手机端与网页端显示的一致口径。"""
         try:
@@ -224,9 +245,7 @@ class Runner:
             st = {}
         if not st:
             return
-        done = sum(1 for v in st.values() if int(v.get("total", 0) or 0) > 0
-                   and int(v.get("unfinish", 0) or 0) == 0)
-        total = sum(1 for v in st.values() if int(v.get("total", 0) or 0) > 0)
+        done, total = self._task_counts(st)
         self.platform_done, self.platform_total = done, total
         for c in chapters:
             v = st.get(c.id)
@@ -390,8 +409,9 @@ class Runner:
             return chapters
         idx = course_mod.parse_index_spec(spec, len(chapters))
         if not idx:
-            self.log.warning(f"【{course.name}】课时表达式「{spec}」未匹配到课时 → 按全部处理")
-            return chapters
+            # 选择条件无效时不能扩大为全部课时，否则一次手误会执行整门课程。
+            self.log.warning(f"【{course.name}】课时表达式「{spec}」未匹配到课时 → 跳过本课程，请检查表达式")
+            return []
         chosen = [ch for i, ch in enumerate(chapters, 1) if i in idx]
         self.log.info(
             f"【{course.name}】课时筛选{('（' + source + '）') if source else ''}："
@@ -433,6 +453,8 @@ class Runner:
 
     def _open_chapter(self, ch):
         """点击章节树里的知识点进入学习页，返回 (页面, cards 帧)。"""
+        # 锁定状态只属于本次打开尝试；任何提前返回都不能污染下一章节。
+        self._last_locked = False
         log = self.log
         page = self._tree_page()
         frame, el = course_mod.chapter_element(page, ch.id)
@@ -503,9 +525,33 @@ class Runner:
                 f"平台状态（接口）：待完成 {pending} / 已完成 {done} / 无任务点 {no_task}"
                 + (f" / 未返回 {missing}" if missing else "")
             )
-            self.platform_done, self.platform_total = done, done + pending
+            self.platform_done, self.platform_total = self._task_counts(st)
         else:
             log.info("平台状态：接口不可用，改用章节树标记判定")
+
+        # 小圆是调度权威：绿色=完成，橙色 N=待完成，橙色 0=直接跳过。
+        circle = course_mod.discover_chapters(page, log, force=True)
+        if circle:
+            cmap = {c.id: c.hint for c in circle}
+            counts = {"green": 0, "orange": 0, "orange0": 0, "unknown": 0}
+            for c in chapters:
+                hint = cmap.get(c.id)
+                if hint is None:
+                    counts["unknown"] += 1
+                    continue
+                c.hint = hint
+                if hint == 0:
+                    counts["green"] += 1
+                elif hint == -1:
+                    counts["orange0"] += 1
+                else:
+                    counts["orange"] += 1
+            log.info(
+                f"小圆状态：绿色 {counts['green']} / 橙色待完成 {counts['orange']}"
+                f" / 橙色0 {counts['orange0']}"
+                + (f" / 未知 {counts['unknown']}" if counts["unknown"] else "")
+            )
+
         prog = course_mod.tree_progress(tree) if tree is not None else None
         if prog:
             log.info(f"章节树进度显示：已完成任务点 {prog[0]}/{prog[1]}")
@@ -563,10 +609,34 @@ class Runner:
                     continue
                 # 拟人化：进入章节前随机滚动页面
                 self.humanizer.scroll(self.session.page)
-                self.process_chapter(ch)
+                status = self.process_chapter(ch)
                 # 章节之间的最小间隔（带随机抖动）
                 self.humanizer.task_interval(int(cfg.safety.min_task_interval_s))
-            pending = [c for c in self.failed_chapters if c.hint != 0]
+
+                # 用户指令门控：小圆绿色才允许下一个；橙色 0 才可跳过。
+                # 例外：本次打开仍识别为“敬请期待/即将上线”的占位章节，可先跳过；
+                # --only 是用户显式只处理某一类任务，也不按整课门控。
+                placeholder_skip = bool(status == "skipped" and getattr(self, "_placeholder_skip", False))
+                if placeholder_skip:
+                    log.info("  占位章节按规则跳过（下次运行仍会重新探测是否能做）")
+                elif not getattr(self.args, "only", "") and ch.hint not in (0, -1):
+                    state = ("橙色 0" if ch.hint == -1
+                             else (f"橙色 {ch.hint}" if ch.hint else "状态未知"))
+                    log.error(
+                        f"  小圆门控未通过（当前 {state}）→ 不进入下一个任务；"
+                        "请人工查看该知识点或等平台登记后重跑"
+                    )
+                    self.report.add(ch.title, "小圆门控", "manual",
+                                    f"小圆未变绿且不是橙色 0（当前 {state}），已停止后续章节")
+                    if ch.title not in self.failed_this_run:
+                        self.failed_this_run.append(ch.title)
+                    if all(c.id != ch.id for c in self.failed_chapters):
+                        self.failed_chapters.append(ch)
+                    aborted = True
+                    break
+            # 平台拦截过提交的题目本 run 不再自动重提，避免连续交白卷。
+            pending = [c for c in self.failed_chapters
+                       if c.hint != 0 and str(c.id) not in self._submit_blocked_ids]
             if pending and not aborted:
                 log.info(f"本轮结束：仍有 {len(pending)} 个知识点未完成"
                          f"（{ '、'.join(c.title[:18] for c in pending[:6]) }…）")
@@ -602,29 +672,53 @@ class Runner:
                 log.warning(f"示例结构导出失败: {exc}")
         print("\n确认清单无误后去掉 --dry-run 正式运行。")
 
-    JS_QUIZ_ENTRY = r"""
-    () => {
-      const kws = ['章节测验','章节测试','单元测验','随堂测验','章节作业','测验','作业','考试'];
-      const bad = ['查看','已完成','已提交','重做','再做','成绩','得分','解析','答案','未开始'];
-      const els = Array.from(document.querySelectorAll('a,div,span,li,button'));
+    # 答题入口关键词（顺序即优先级：越靠前越像“本章节的测验”）
+    QUIZ_ENTRY_KWS = ('章节测验', '章节测试', '单元测验', '随堂测验', '章节作业',
+                      '测验', '作业', '考试', '开始答题', '继续答题', '去答题', '去完成')
+    JS_QUIZ_CANDIDATES = r"""
+    (kws) => {
+      // 收集“能打开答题页”的入口并按相似度评分，返回前 6 个。
+      // 教训（国家安全教育课实测）：章节名叫「2.5 章节测验」时，页面里到处都是
+      // 这几个字——标题栏、侧边目录、顶栏跳转——旧的“第一个命中”逻辑点中的
+      // 是标题/目录项，答题页根本打不开，程序却在原地空找两分钟，
+      // 用户看到的就是“卡在那边不做题”。
+      const bad = ['查看','已完成','已提交','重做','再做','成绩','得分','解析','答案','未开始',
+                   '返回','上一节','下一节','目录','讨论','笔记','标注'];
+      const banArea = 'header,footer,nav,aside,[class*="nav"],[class*="menu"],'
+        + '[class*="footer"],[class*="header"],[class*="sidebar"],[class*="crumb"],'
+        + '[class*="tab-bar"],[class*="Catalog"],[class*="catalog"],[class*="posChapter"],'
+        + '[class*="subNav"],[class*="prev_title"],[class*="prev_next"],[class*="tips"]';
+      const out = [];
+      const seen = new Set();
+      const els = Array.from(document.querySelectorAll('a,button,div,span,li,p'));
       for (const el of els) {
         const raw = (el.innerText || '').replace(/\s+/g, '').trim();
         if (!raw || raw.length > 16) continue;
-        if (!kws.some(k => raw.includes(k))) continue;
+        const kw = kws.find(k => raw.includes(k));
+        if (!kw) continue;
         if (bad.some(b => raw.includes(b))) continue;
         if (el.offsetParent === null) continue;
-        // 排除导航栏/页脚/侧栏里的"测验"字样（那是干扰项，点了打不开答题页）
-        const badArea = el.closest('header,footer,nav,aside,[class*="nav"],[class*="menu"],'
-                                   + '[class*="footer"],[class*="header"],[class*="sidebar"],'
-                                   + '[class*="crumb"],[class*="tab-bar"]');
-        if (badArea) continue;
-        const clickable = el.tagName === 'A' || el.getAttribute('onclick')
-                          || (el.style && el.style.cursor === 'pointer');
-        if (!clickable) continue;
-        const inner = el.querySelector('a, [onclick]');
-        return inner || el;
+        if (el.closest(banArea)) continue;
+        let s = 0;
+        if (raw === kw) s += 6;                          // 文字恰是“章节测验/作业”本体
+        if (/开始|立即|进入|继续|去/.test(raw)) s += 4;   // “开始答题/继续作答/去完成”最像入口
+        const lcls = (' ' + (typeof el.className === 'string' ? el.className : '') + ' ')
+          .toLowerCase();
+        if (/insert|attach|job|exam|test|homework/.test(lcls)) s += 5;  // 任务点卡片容器
+        if (el.tagName === 'A' || el.tagName === 'BUTTON' || el.getAttribute('onclick')
+            || getComputedStyle(el).cursor === 'pointer') s += 2;
+        const childHit = Array.from(el.children).some(c =>
+          ((c.innerText || '') + '').replace(/\s+/g, '').includes(kw));
+        if (!childHit) s += 2; else s -= 2;              // 叶子优先；大容器降权
+        const r = el.getBoundingClientRect();
+        if (r.width * r.height > 120000) s -= 4;
+        const target = el.querySelector('a, [onclick]') || el;
+        if (seen.has(target)) continue;
+        seen.add(target);
+        out.push({el: target, s});
       }
-      return null;
+      out.sort((a, b) => b.s - a.s);
+      return out.slice(0, 6).map(o => o.el);
     }
     """
 
@@ -662,6 +756,98 @@ class Runner:
         label: (e.innerText || '').replace(/\s+/g, '').slice(0, 4),
         active: /active/.test(e.className || '')
       }));
+    }
+    """
+
+    # 内容都做完后，用于推进到下一块/提交的可见入口。
+    # 顺序即优先级（评分随下标递减）：“提交”放最后，避免抢在翻块按钮前面误交卷。
+    ADVANCE_MARKS = ("下一节", "下一章", "继续学习", "下一步", "提交")
+    JS_ADVANCE_CANDIDATES = r"""
+    (marks) => {
+      // 收集所有可见的推进入口并按"像不像翻块按钮"评分，返回前 6 个。
+      // 背景：超星页面多用 jQuery 事件委托绑定点击，按钮本身常常没有
+      // onclick/role/cursor 特征；旧版"必须可点击 + 父元素带匹配子元素就跳过"
+      // 的硬过滤会把父子全排除，表现为"看得到下一节，程序却找不到"。
+      const bad = ['上一节', '上一章', '返回', '关闭', '取消', '上一题', '上一页'];
+      const picked = [];
+      const seen = new Set();
+      const textOf = (el) => {
+        let t = el.tagName === 'INPUT' ? (el.value || '') : (el.innerText || '');
+        t = (t || '').replace(/\s+/g, '');
+        if (!t) t = ((el.getAttribute('title') || '') + (el.getAttribute('aria-label') || ''))
+          .replace(/\s+/g, '');
+        return t;
+      };
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) return false;
+        const st = getComputedStyle(el);
+        return st.display !== 'none' && st.visibility !== 'hidden'
+          && st.pointerEvents !== 'none';
+      };
+      // 1) 文本命中的候选（不再硬性要求"可点击"：点子元素会冒泡到父级委托 handler）
+      const els = Array.from(document.querySelectorAll(
+        'a,button,input[type=button],input[type=submit],div,span,li'));
+      for (const el of els) {
+        if (seen.has(el)) continue;
+        const txt = textOf(el);
+        if (!txt || txt.length > 14) continue;
+        if (bad.some(b => txt.includes(b))) continue;
+        const mk = marks.findIndex(m => txt.includes(m));
+        if (mk < 0) continue;
+        if (!visible(el) || el.disabled === true) continue;
+        let s = Math.max(0, 8 - mk * 2);              // 关键词越靠前越优先
+        if (txt === marks[mk]) s += 6;                // 文字完全等于关键词，最像按钮本体
+        const cls = (' ' + (typeof el.className === 'string' ? el.className : '')
+          + ' ' + (el.id || '')).toLowerCase();
+        if (/prev_next|next|jb_btn/.test(cls)) s += 4;
+        if (['A', 'BUTTON', 'INPUT'].includes(el.tagName)) s += 2;
+        if (el.getAttribute('onclick') || el.getAttribute('role') === 'button'
+            || getComputedStyle(el).cursor === 'pointer') s += 2;
+        const childMatch = Array.from(el.children).some(c => {
+          const t = textOf(c);
+          return t && marks.some(m => t.includes(m));
+        });
+        if (!childMatch) s += 3; else s -= 2;         // 叶子优先；大容器降权但不再直接排除
+        const r = el.getBoundingClientRect();
+        const area = r.width * r.height;
+        if (area > 120000) s -= 4;                    // 近全屏的大容器基本不是按钮
+        else if (area < 60000) s += 1;
+        picked.push({el, s});
+        seen.add(el);
+      }
+      // 2) 无文字的结构候选（箭头图标按钮：class/id 词根含 next / prevnext）
+      for (const el of Array.from(document.querySelectorAll('a,button,div,span,li'))) {
+        if (seen.has(el)) continue;
+        const cls = ' ' + (typeof el.className === 'string' ? el.className : '')
+          + ' ' + (el.id || '') + ' ';
+        const tokens = cls.toLowerCase().split(/[\s_:-]+/).filter(Boolean);
+        const hit = tokens.some(tk => tk === 'next' || tk === 'prevnext'
+          || tk.startsWith('next') || tk.endsWith('next'));
+        if (!hit) continue;
+        if (!visible(el) || el.disabled === true) continue;
+        const txt = textOf(el);
+        if (txt && bad.some(b => txt.includes(b))) continue;  // "上一节"类同样带 next 词根
+        seen.add(el);
+        picked.push({el, s: 5});                      // 图标按钮排在文字精确命中之后
+      }
+      picked.sort((a, b) => b.s - a.s);
+      return picked.slice(0, 6).map(o => o.el);
+    }
+    """
+
+    JS_PAGE_STATE = r"""
+    () => {
+      // 页面指纹：标题 / 激活页签 / 内容 iframe / 正文摘要。
+      // 数字统一归为 #：播放器计时文案每秒都在变，否则指纹永远"有变化"。
+      const clean = (s) => (s || '').replace(/\s+/g, '').replace(/\d+/g, '#');
+      const t = document.querySelector('.prev_title');
+      const active = Array.from(document.querySelectorAll('li.active'))
+        .map(e => clean(e.innerText).slice(0, 10)).join('|');
+      const ifr = Array.from(document.querySelectorAll('iframe'))
+        .map(i => clean(i.getAttribute('src')).slice(0, 100)).slice(0, 4).join('||');
+      const body = clean(document.body ? document.body.innerText : '').slice(0, 300);
+      return (t ? clean(t.innerText) : '') + '@' + active + '@' + ifr + '@' + body;
     }
     """
 
@@ -721,27 +907,105 @@ class Runner:
                 return str(t).strip()
         return ""
 
-    def _click_next_block(self, page):
-        """点「下一节」按钮（章节内切换内容块）；点了返回 True。"""
+    def _advance_candidates(self, page):
+        """收集各帧里所有可见的推进入口（下一节/继续/提交/图标箭头），按相似度排序。
+
+        旧版只取文档序第一个命中，既容易漏（过滤过严）也容易抓错（推荐位里的
+        "继续学习"大卡片）；现在综合评分、逐个候选点击并验证效果。
+        """
+        out = []
         for f in course_mod.all_frames(page):
-            for sel in ("div.prev_next.next", "a.prev_next.next", ".jb_btn.next"):
+            try:
+                arr = f.evaluate_handle(self.JS_ADVANCE_CANDIDATES, self.ADVANCE_MARKS)
+                count = int(arr.evaluate("a => a.length") or 0)
+            except Exception:  # noqa: BLE001
+                continue
+            for i in range(count):
                 try:
-                    el = f.query_selector(sel)
+                    el = arr.evaluate_handle("(a, i) => a[i]", i).as_element()
                 except Exception:  # noqa: BLE001
-                    continue
+                    el = None
                 if el is None:
                     continue
                 try:
-                    if not el.is_visible():
-                        continue
-                    if "上一节" in ((el.inner_text() or "").strip()):
-                        continue
-                    el.click(timeout=4000)
+                    desc = (el.inner_text() or el.get_attribute("class") or "?").strip()[:14]
                 except Exception:  # noqa: BLE001
+                    desc = ""
+                out.append((desc or "(图标按钮)", el))
+        return out[:8]
+
+    def _page_state(self, page):
+        """页面指纹；发生变化即认为点击起了作用（翻块/切页签/弹窗/换内容帧）。"""
+        parts = []
+        for f in course_mod.all_frames(page):
+            try:
+                sig = f.evaluate(self.JS_PAGE_STATE)
+            except Exception:  # noqa: BLE001
+                continue
+            if sig:
+                parts.append(str(sig))
+        return " ;; ".join(parts)
+
+    def _click_next_block(self, page):
+        """点「下一节」等推进入口；只有页面确认发生变化才返回 True。
+
+        三层保险：
+        1) 多候选评分排序（文本 + 结构图标），不再依赖单一旧版 class；
+        2) 常规点击失败（被遮挡/超时）→ JS 合成点击兜底，事件冒泡触发委托 handler；
+        3) 点完用页面指纹验证效果；没变化就换下一个候选，不再"点一次就算成功"。
+        """
+        cands = self._advance_candidates(page)
+        if not cands:
+            return False
+        state0 = self._page_state(page)
+        try:
+            pages_before = {id(p) for p in self.session.context.pages}
+        except Exception:  # noqa: BLE001
+            pages_before = set()
+        for desc, el in cands:
+            clicked = False
+            try:
+                el.scroll_into_view_if_needed(timeout=2500)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if getattr(self.session, "humanizer", None) is not None:
+                    clicked = bool(self.session.humanizer.click(page, el, timeout=6000))
+                else:
+                    el.click(timeout=6000)
+                    clicked = True
+            except Exception as exc:  # noqa: BLE001
+                self.log.debug(f"  推进入口[{desc}]常规点击失败: {str(exc)[:60]}")
+            if not clicked:
+                # 合成点击：绕开 Playwright 的可点性检查（遮挡/出视口），直接派发 DOM 事件
+                try:
+                    el.evaluate(
+                        "e => { try { e.scrollIntoView({block: 'center'}); } catch (_) {}"
+                        " e.click(); }"
+                    )
+                    clicked = True
+                except Exception as exc:  # noqa: BLE001
+                    self.log.debug(f"  推进入口[{desc}]合成点击失败: {str(exc)[:60]}")
                     continue
-                page.wait_for_timeout(3500)
+            # 点击后轮询数秒：翻块 / 新标签页 / 弹窗引起的指纹变化都算推进成功
+            for _ in range(8):
+                page.wait_for_timeout(750)
                 self.popup.tick(page)
-                return True
+                try:
+                    for p in self.session.context.pages:
+                        if id(p) not in pages_before:
+                            try:
+                                p.bring_to_front()
+                            except Exception:  # noqa: BLE001
+                                pass
+                            self.log.info(f"  「下一节」类入口在新标签页打开（来自 [{desc}]）")
+                            return True
+                except Exception:  # noqa: BLE001
+                    pass
+                if self._page_state(page) != state0:
+                    self.log.info(f"  已点击推进入口: {desc}")
+                    return True
+            # 当前候选点了没效果 → 换下一个（可能是页面上另一个"下一节"入口）
         return False
 
     def _continue_next_block(self, ch, page, max_steps=3):
@@ -763,24 +1027,29 @@ class Runner:
                 log.info(f"  「下一节」跳到了其它知识点（{after}）→ 回到原章节继续")
                 self._open_chapter(ch)
                 return did
-            cards = course_mod.find_content_frame(page)
+            # 点击生效后内容帧要几秒才重新注册；找不到就直接放弃会误判"没新内容"
+            cards = None
+            for _ in range(5):
+                cards = course_mod.find_content_frame(page)
+                if cards is not None:
+                    break
+                page.wait_for_timeout(1000)
+                self.popup.tick(page)
             if cards is None:
+                log.info("  等待后仍未找到新内容帧 → 停止继续翻块")
                 return did
-            entry = self._find_quiz_entry(page)
-            if entry is not None:
+            entry_host = self._try_open_quiz(page)
+            if entry_host is not None:
                 log.info(f"  「下一节」第 {step} 块：有答题入口 → 处理")
-                qp = page
-                try:
-                    qp, _ = self.session.click_capture(page, entry, wait_s=12)
-                    qp.wait_for_timeout(3000)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning(f"     打开答题入口失败: {str(exc)[:60]}")
-                s, n = self._handle_quiz(qp, ch)
+                s, n = self._handle_quiz(entry_host, ch)
             else:
                 t = course_mod.card_type(cards)
                 log.info(f"  「下一节」第 {step} 块：类型 {t} → 处理")
                 s, n = self._handle_card(page, cards, t, ch)
             log.info(f"     → {s} | {str(n)[:70]}")
+            if s == "manual":
+                log.info("     当前块需人工处理 → 不继续点击提交/下一节，避免误交")
+                return did
             if s in ("done", "failed"):
                 did = True
             h = self._verify_chapter(ch, rounds=1)
@@ -788,8 +1057,21 @@ class Runner:
                 return True
         return did
 
+    def _should_handle(self, ctype):
+        """所有分派路径共用的 --only 过滤，避免标签页/任务中心绕过限制。"""
+        only = getattr(self.args, "only", "")
+        if not only:
+            return True
+        normalized = {"audio": "video", "read": "document"}.get(ctype, ctype)
+        return normalized == only
+
     def _play_video_here(self, page, ch):
         """在当前标签页里播视频（新版知识点页的视频在 knowledge/cards 帧内）。"""
+        if not self._should_handle("video"):
+            return "skipped", f"被 --only={self.args.only} 过滤"
+        live = self._handle_live(page, ch)
+        if live is not None:
+            return live
         self.task_count += 1
         self.humanizer.scroll(page)
         return video_mod.play_video(
@@ -799,6 +1081,11 @@ class Runner:
 
     def _browse_here(self, page, ch):
         """当前标签页是文档/正文 → 滚动浏览。"""
+        if not self._should_handle("document"):
+            return "skipped", f"被 --only={self.args.only} 过滤"
+        live = self._handle_live(page, ch)
+        if live is not None:
+            return live
         self.task_count += 1
         self.humanizer.scroll(page)
         return document_mod.browse_document(self.session, self.cfg, self.log, page, self.popup, None)
@@ -830,33 +1117,107 @@ class Runner:
             uniq.append(item)
         return uniq
 
-    def _find_quiz_entry(self, page):
-        """在章节页里找"章节测验/作业"入口元素。
+    def _quiz_entry_candidates(self, page):
+        """收集各帧里的答题入口候选（内容帧优先），按“最像真入口”排序。
 
-        有些课程（如某课程甲）的**任务点就是章节测验**，视频只是内容、不计任务点，
-        所以必须主动点开测验去做，而不能只播视频。
+        旧的 _find_quiz_entry 按文档序取第一个命中：章节本身就叫「章节测验」时，
+        命中的往往是标题/侧边目录/顶栏跳转，点了打不开答题页。
         """
-        for root in course_mod.all_frames(page):
+        frames = course_mod.all_frames(page)
+
+        def frame_order(f):
             try:
-                handle = root.evaluate_handle(self.JS_QUIZ_ENTRY)
-                el = handle.as_element() if handle is not None else None
-                if el is not None:
-                    return el
+                if f is page.main_frame:
+                    return 2      # 主框架里的“测验”字样多半是标题/目录，放最后
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                url = (f.url or "").lower()
+            except Exception:  # noqa: BLE001
+                url = ""
+            if "cards" in url or "knowledge" in url:
+                return 0          # 内容帧里的入口最可能是真卡片
+            return 1
+
+        frames.sort(key=frame_order)
+        out = []
+        for f in frames:
+            try:
+                arr = f.evaluate_handle(self.JS_QUIZ_CANDIDATES, list(self.QUIZ_ENTRY_KWS))
+                count = int(arr.evaluate("a => a.length") or 0)
             except Exception:  # noqa: BLE001
                 continue
+            for i in range(count):
+                try:
+                    el = arr.evaluate_handle("(a, i) => a[i]", i).as_element()
+                except Exception:  # noqa: BLE001
+                    el = None
+                if el is None:
+                    continue
+                try:
+                    desc = (el.inner_text() or "").strip()[:12]
+                except Exception:  # noqa: BLE001
+                    desc = ""
+                out.append((desc or "(无文字入口)", el))
+        return out[:8]
+
+    def _try_open_quiz(self, page):
+        """逐个尝试答题入口，验证答题帧真的出现才算打开成功；返回答题宿主页。
+
+        旧版点一个候选就交给 _handle_quiz 空找 2 分钟；现在点了没反应会自动
+        换下一个候选（这就是“卡在那边不做题”的主因）。
+        """
+        # 0) 答题页可能已经内嵌在当前页（insertwork/work 帧直接加载）→ 无需点击
+        host, _ = self._locate_quiz(page)
+        if host is not None:
+            self.log.info("  答题页已内嵌在当前页 → 直接处理")
+            return host
+        cands = self._quiz_entry_candidates(page)
+        if not cands:
+            return None
+        for desc, el in cands[:6]:
+            try:
+                before = {id(p) for p in self.session.context.pages}
+            except Exception:  # noqa: BLE001
+                before = set()
+            try:
+                qp, _ = self.session.click_capture(page, el, wait_s=6)
+            except Exception as exc:  # noqa: BLE001
+                self.log.debug(f"  答题入口[{desc}]点击失败: {str(exc)[:60]}")
+                continue
+            # 等答题帧加载（慢网时太短会误判“没打开”，进而误关刚开的答题标签）
+            qp.wait_for_timeout(3500)
+            self.popup.tick(qp)
+            host, _ = self._locate_quiz(qp)
+            if host is not None:
+                self.log.info(f"  已打开答题页（入口: {desc}）")
+                return host
+            # 这个入口没打开答题页 → 关掉可能误开的新标签，换下一个候选
+            try:
+                for p in self.session.context.pages:
+                    if id(p) not in before:
+                        self.session.close_page(p)
+            except Exception:  # noqa: BLE001
+                pass
+            self.log.debug(f"  答题入口[{desc}]未打开答题页 → 换下一个候选")
         return None
 
     def process_chapter(self, ch):
         log = self.log
+        # 每次打开都重新判断；占位状态不跨运行缓存。
+        self._placeholder_skip = False
         page, cards = self._open_chapter(ch)
         if getattr(self, "_last_locked", False):
             log.info("  结果: skipped | 章节未开放，跳过（非错误）")
             self.report.add(ch.title, f"[未开放] {ch.title[:50]}", "skipped", "章节未开放（平台限制）")
             self.skipped_this_run.append(ch.title)
-            return
+            return "skipped"
         rate_used = 1.0
         ctype = "unknown"
         status, note = "manual", "未处理"
+        # 记录本知识点处理前已做的任务数：结束时若一个任务都没做成，
+        # 说明平台不可能“稍后补登记”，没必要干等 3 分钟复核。
+        start_tasks = self.task_count
 
         # ①-A tab 式任务点（"1学习目标 / 2微课视频 / 3章节测验"）→ 逐个标签处理，按内容分派
         tabs = self._quiz_tabs(page)
@@ -876,7 +1237,8 @@ class Runner:
                     continue
                 log.info(f"   [{i + 1}/{len(tabs)}] {ttext}（{tkind}）→ 点开处理")
                 try:
-                    self.session.click_capture(page_i, tel, wait_s=6)
+                    # 保留本次点击实际命中的页面，避免随后在旧答题标签页中查找。
+                    page_i, _ = self.session.click_capture(page_i, tel, wait_s=6)
                 except Exception as exc:  # noqa: BLE001
                     log.warning(f"     点击标签失败: {str(exc)[:60]}")
                 page_i.wait_for_timeout(4000)
@@ -916,6 +1278,13 @@ class Runner:
                                 rate_used = float(m_v.group(1))
                     else:
                         log.info(f"  页内任务点类型为 {t_v}，未做额外处理")
+                # 标签/视频都做完仍未绿 → 章节里还有靠「下一节」切换的内容块
+                h_tab = self._verify_chapter(ch, rounds=1)
+                if isinstance(h_tab, int) and h_tab > 0:
+                    log.info(f"  标签页处理后仍有 {h_tab} 个任务点未完成 → 用「下一节」继续剩余内容")
+                    page_c, _ = self._open_chapter(ch)
+                    if self._continue_next_block(ch, page_c, 3):
+                        status, note = "done", f"{note}；已用「下一节」继续后续内容"
         elif (pm := self._page_tabs(page)) and not tabs:
             # ①-B 章节内多页（页签是纯数字，无"视频/测验"文字）→ 逐页处理
             # 这类章节平台端 totalcount 可能为 2，只做第 1 页会永远停在 1/2
@@ -940,16 +1309,10 @@ class Runner:
                     log.info(f"   [第 {idx + 1}/{len(pm)} 页] 检测到视频 → 播放")
                     s_i, n_i = self._play_video_here(p_i, ch)
                 else:
-                    entry_i = self._find_quiz_entry(p_i)
-                    if entry_i is not None:
+                    qp_i = self._try_open_quiz(p_i)
+                    if qp_i is not None:
                         log.info(f"   [第 {idx + 1}/{len(pm)} 页] 检测到答题入口 → 处理")
-                        qp = p_i
-                        try:
-                            qp, _ = self.session.click_capture(p_i, entry_i, wait_s=12)
-                            qp.wait_for_timeout(3000)
-                        except Exception as exc:  # noqa: BLE001
-                            log.warning(f"     打开答题入口失败: {str(exc)[:60]}")
-                        s_i, n_i = self._handle_quiz(qp, ch)
+                        s_i, n_i = self._handle_quiz(qp_i, ch)
                     elif cards_i is not None:
                         t_i = course_mod.card_type(cards_i)
                         log.info(f"   [第 {idx + 1}/{len(pm)} 页] 无视频/答题入口，类型 {t_i} → 处理")
@@ -981,38 +1344,39 @@ class Runner:
             # （占位章节直接跳过，不去等那 3 分钟复核）
             h_v = self._verify_chapter(ch, rounds=1) if status != "skipped" else None
             if isinstance(h_v, int) and h_v > 0:
-                entry_v = self._find_quiz_entry(page)
-                if entry_v is not None:
+                if self._quiz_entry_candidates(page):
                     log.info(f"  视频完成后仍有 {h_v} 个任务点未完成 → 补做本章节测验/作业")
-                    self.task_count += 1
                     self.humanizer.scroll(page)
-                    qpage = page
-                    try:
-                        qpage, _ = self.session.click_capture(page, entry_v, wait_s=12)
-                        qpage.wait_for_timeout(3000)
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning(f"  点击测验入口失败: {str(exc)[:70]}")
-                    s_q, n_q = self._handle_quiz(qpage, ch)
-                    if s_q != "skipped":
-                        ctype, status, note = "quiz", s_q, f"{note}；另：{n_q}"
-        elif (entry := self._find_quiz_entry(page)) is not None:
-            log.info("  页内有测验/作业入口 → 优先处理（该课任务点可能是测验而非视频）")
-            self.task_count += 1
+                    qpage = self._try_open_quiz(page)
+                    if qpage is not None:
+                        self.task_count += 1
+                        s_q, n_q = self._handle_quiz(qpage, ch)
+                        if s_q != "skipped":
+                            ctype, status, note = "quiz", s_q, f"{note}；另：{n_q}"
+                    else:
+                        note += "；测验入口未打开答题页"
+        elif (self._locate_quiz(page)[0] is not None or self._quiz_entry_candidates(page)):
+            # ②-B 页内有测验/作业入口（或答题页已内嵌）→ 逐个候选尝试打开，
+            #     点了没反应自动换下一个，不再“点错一次空找两分钟”。
+            log.info("  页内有测验/作业入口 → 逐个尝试打开答题页")
             self.humanizer.scroll(page)
-            qpage = page
-            try:
-                qpage, _ = self.session.click_capture(page, entry, wait_s=12)
-                qpage.wait_for_timeout(3000)
-            except Exception as exc:  # noqa: BLE001
-                log.warning(f"  点击测验入口失败: {str(exc)[:70]}")
-            status, note = self._handle_quiz(qpage, ch)
+            qpage = self._try_open_quiz(page)
+            if qpage is None:
+                status, note = "manual", "未找到答题入口，请人工打开该章节测验"
+            else:
+                # 打开了才算真的做了任务；没打开时 task_count 不变，
+                # 结尾才会走“快速复核”而不是干等 3 分钟。
+                self.task_count += 1
+                status, note = self._handle_quiz(qpage, ch)
             ctype = "quiz"
             # 快速判断即可：以前这里用完整 5 轮复核（约 3 分钟），做完题后干等，
             # 用户看到的现象就是「答完题程序不动了」。
             h0 = self._verify_chapter(ch, rounds=1)
             if isinstance(h0, int) and h0 > 0:
                 log.info(f"  测验后仍有 {h0} 个任务点未完成 → 用「下一节」继续本章节剩余内容")
-                if self._continue_next_block(ch, page, 3):
+                # 「下一节」在知识点页上；quiz 可能是在新标签里答的，重开页面再找按钮
+                page_n, _ = self._open_chapter(ch)
+                if self._continue_next_block(ch, page_n, 3):
                     status, note = "done", f"{note}；已用「下一节」继续后续内容"
                 else:
                     log.info("  「下一节」未带来新内容 → 退回处理页内视频/文档")
@@ -1046,9 +1410,13 @@ class Runner:
             # 找不到提交按钮 / 章节无需处理 → 不进入 3 分钟复核，直接进入下一节
             hint = None
             log.info("  跳过平台复核，直接进入下一节")
+        elif status == "manual" and self.task_count == start_tasks:
+            # 本知识点没做成任何任务（题没打开/内容没识别）→ 平台不会“稍后登记”，
+            # 只快速复核一次即可；干等 3 分钟就是用户看到的“卡住不动”。
+            log.info("  本知识点未执行任何任务 → 快速复核（不长时间等待平台登记）")
+            hint = self._verify_chapter(ch, rounds=1)
         else:
             hint = self._verify_chapter(ch)
-
         # 兜底：用了倍速但平台没登记（实测平台按真实时间核验）→ 用 1 倍速重播一次
         if rate_used > 1.0 and isinstance(hint, int) and hint > 0:
             log.warning(f"  平台未登记倍速播放（rate={rate_used}x）→ 改用 1 倍速重播一次")
@@ -1062,6 +1430,22 @@ class Runner:
                 status, note = status2, f"{note}；1x 重播：{note2}"
                 hint = self._verify_chapter(ch)
 
+        # 题目/视频/音频/文章都处理成功后，若小圆仍是橙色，先重扫当前页；
+        # 仍有剩余时再找“提交/下一节”入口。manual/failed 不乱点提交。
+        if status == "done" and isinstance(hint, int) and hint > 0:
+            log.info(f"  内容处理后仍有 {hint} 个任务点未完成 → 重扫当前页剩余任务")
+            r_status, r_note = self._rescan_current_tasks(ch, page)
+            if r_status == "done":
+                note += f"；重扫处理：{r_note}"
+                hint = self._verify_chapter(ch)
+            if isinstance(hint, int) and hint > 0:
+                log.info(f"  重扫后仍有 {hint} 个任务点未完成 → 查找“提交/下一节/继续”入口")
+                # page 可能停在答完题的旧标签页上；重开知识点页再找「下一节」
+                page_c, _ = self._open_chapter(ch)
+                if self._continue_next_block(ch, page_c, 3):
+                    note += "；已尝试提交/下一节推进"
+                    hint = self._verify_chapter(ch)
+
         if hint is not None:
             if hint == 0:
                 note += "；复核：平台已标记完成"
@@ -1073,19 +1457,27 @@ class Runner:
                     status = "failed"
         self.report.add(ch.title, f"[{TYPE_LABEL.get(ctype, ctype)}] {ch.title[:50]}", status, note)
         log.info(f"  结果: {status} | {note}")
+        # 占位章节（敬请期待/即将上线等）允许本轮跳过，但不持久缓存；下次仍会重开探测。
+        self._placeholder_skip = bool(status == "skipped" and self._is_placeholder_note(note))
         # 明确区分"处理过了"和"平台已登记完成"，并刷新平台口径进度
         if status == "done":
-            self.done_this_run.append(ch.title)
+            # 汇总只保留最终状态：重试成功后移除首轮失败记录，且同标题不重复计数。
+            self.failed_this_run = [t for t in self.failed_this_run if t != ch.title]
+            if ch.title not in self.done_this_run:
+                self.done_this_run.append(ch.title)
             log.info("  ✔ 本知识点已完成（平台已登记）")
             self.failed_chapters = [c for c in self.failed_chapters if c.id != ch.id]
         elif status in ("failed", "manual"):
-            self.failed_this_run.append(ch.title)
+            self.done_this_run = [t for t in self.done_this_run if t != ch.title]
+            if ch.title not in self.failed_this_run:
+                self.failed_this_run.append(ch.title)
             if all(c.id != ch.id for c in self.failed_chapters):
                 self.failed_chapters.append(ch)      # 进入重试队列，不会直接跳过
             label = "需人工" if status == "manual" else "未通过复核"
             log.info(f"  ✘ 本知识点{label}：{note[:80]}")
             log.info("     → 已加入重试队列，本轮末尾会再试一次")
         self._refresh_platform_progress(self._chapters_cache or [ch], quiet=False)
+        return status
 
     @staticmethod
     def _type_from_title(title):
@@ -1110,6 +1502,12 @@ class Runner:
     # 占位提示关键词：内容帧只有这类文字，说明任务点还没放内容
     PLACEHOLDER_KW = ("敬请期待", "即将上线", "即将推送", "暂未开放",
                       "尚未开始", "待上传", "正在准备", "稍后开放")
+
+    @classmethod
+    def _is_placeholder_note(cls, note):
+        """结果说明是否为“敬请期待/即将上线”类占位页。"""
+        text = str(note or "")
+        return any(k in text for k in cls.PLACEHOLDER_KW)
 
     def _placeholder_note(self, cards):
         """任务点若是「敬请期待」类占位页，返回提示文字；否则返回 None。
@@ -1140,11 +1538,94 @@ class Runner:
             return text[:70] or "(空白页)"
         return None
 
+    def _find_live_entry(self, page):
+        """找直播/回放入口（modules/live 里的 a.liveHref）。"""
+        for f in course_mod.all_frames(page):
+            try:
+                if "modules/live" not in (f.url or "").lower():
+                    continue
+                el = f.query_selector("a.liveHref")
+                if el is not None and el.is_visible():
+                    return f, el
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+    def _handle_live(self, page, ch):
+        """点进直播卡片，进入 zhibo.chaoxing.com 回放页后按视频播放。"""
+        log = self.log
+        entry = self._find_live_entry(page)
+        if entry is None:
+            return None
+        f, el = entry
+        try:
+            title = (el.inner_text() or "").strip().replace("\n", " ")[:50]
+        except Exception:  # noqa: BLE001
+            title = "直播"
+        log.info(f"  发现直播/回放入口：{title} → 点进去")
+        completion_hint = video_mod.detect_completion_ratio(page, default=None)
+        if completion_hint is not None:
+            log.info(f"  直播完成线：{completion_hint:.0%}")
+        else:
+            log.info("  直播卡片未写明确完成线 → 由播放器页再检测（找不到则按 100%）")
+        try:
+            before_pages = {id(p) for p in self.session.context.pages}
+        except Exception:  # noqa: BLE001
+            before_pages = set()
+        target, _ = self.session.click_capture(page, el, wait_s=12)
+        # click_capture 有时会把新标签页当作“原页面”返回；这里按 URL/新页显式定位。
+        live_page = None
+        for _ in range(12):
+            try:
+                pages = [p for p in self.session.context.pages if not p.is_closed()]
+            except Exception:  # noqa: BLE001
+                pages = []
+            for p in pages:
+                try:
+                    u = (p.url or "").lower()
+                except Exception:  # noqa: BLE001
+                    continue
+                if "zhibo.chaoxing.com" in u:
+                    live_page = p
+                    break
+                if id(p) not in before_pages and "passport" not in u:
+                    live_page = p
+            if live_page is not None:
+                break
+            page.wait_for_timeout(500)
+        if live_page is None and "zhibo.chaoxing.com" in (target.url or "").lower():
+            live_page = target
+        if live_page is None:
+            log.warning("  点了直播入口，但没有捕获到直播标签页 → 转人工")
+            return "manual", "直播入口已点击，但未打开直播页"
+        try:
+            live_page.bring_to_front()
+        except Exception:  # noqa: BLE001
+            pass
+        live_page.wait_for_timeout(6000)
+        self.popup.tick(live_page)
+        try:
+            log.info(f"  直播页已打开: {live_page.url[:100]}")
+            status, note = video_mod.play_video(
+                self.session, self.cfg, log, live_page, self.popup, None,
+                keepalive=self._ensure_session, completion_ratio=completion_hint,
+            )
+            return status, f"直播回放：{note}"
+        finally:
+            # 只关闭本次新开的直播页，不关主学习页。
+            if id(live_page) not in before_pages:
+                self.session.close_page(live_page)
+
     def _handle_card(self, page, cards, ctype, ch):
         log, cfg = self.log, self.cfg
-        self.task_count += 1
-        if getattr(self.args, "only", "") and ctype != self.args.only:
+        if not self._should_handle(ctype):
             return "skipped", f"被 --only={self.args.only} 过滤"
+        self.task_count += 1
+        # 直播模块外层可能写着“敬请期待”，但内层仍有可回放入口；
+        # 必须先点 liveHref，不能直接按占位页跳过。
+        live_result = self._handle_live(page, ch)
+        if live_result is not None:
+            return live_result
         ph = self._placeholder_note(cards)
         if ph:
             log.info(f"  本章节暂无内容（{ph}）→ 跳过，不计失败")
@@ -1155,7 +1636,10 @@ class Runner:
         self.humanizer.scroll(page)
         try:
             if ctype in ("video", "audio"):
-                return video_mod.play_video(self.session, cfg, log, page, self.popup, None)
+                return video_mod.play_video(
+                    self.session, cfg, log, page, self.popup, None,
+                    keepalive=self._ensure_session,
+                )
             if ctype == "document":
                 return document_mod.browse_document(self.session, cfg, log, page, self.popup, None)
             if ctype == "quiz":
@@ -1175,35 +1659,151 @@ class Runner:
                 url = (f.url or "").lower()
             except Exception:  # noqa: BLE001
                 continue
-            if "dohomework" in url:
+            # doHomeWorkNew 之外，还有 insertwork / addStudentWork 等内嵌形态；
+            # 不匹配 work/list（作业列表页，没有题目可做）
+            if ("dohomework" in url or "insertwork" in url
+                    or "studentwork" in url or "addstudentwork" in url):
                 return f
             if wrapper is None and "modules/work" in url:
                 wrapper = f
         return wrapper
 
-    def _quiz_pages(self, page):
-        """当前页 + 所有标签页（答题页可能在新标签里打开）。"""
+    def _quiz_pages(self, page, candidate_pages=None):
+        """当前页 + 本次处理期间新开的页面；默认不扫描历史答题标签页。"""
         out = [page]
-        try:
-            for p in self.session.context.pages:
-                if p not in out:
-                    out.append(p)
-        except Exception:  # noqa: BLE001
-            pass
+        for p in candidate_pages or []:
+            if p not in out:
+                out.append(p)
         return out
 
-    def _locate_quiz(self, page):
-        """在所有标签页里找答题帧，返回 (所在页, 答题帧)；找不到返回 (None, None)。"""
-        for p in self._quiz_pages(page):
+    def _locate_quiz(self, page, candidate_pages=None):
+        """在当前页和指定新页面里找答题帧，避免命中上一份测验的旧标签页。"""
+        for p in self._quiz_pages(page, candidate_pages):
             qf = self._quiz_frame(p)
             if qf is not None:
                 return p, qf
         return None, None
 
+    @staticmethod
+    def _is_unfinished_note(note):
+        """测验提交被拦截/未作答类结果，触发“重扫剩余任务，不重复提交”。"""
+        text = str(note or "")
+        return any(k in text for k in ("未作答", "尚未作答", "提交被拦截", "未完成"))
+
+    def _run_quiz(self, page, ch):
+        """测验统一入口：提交被拦截时先重扫当前页其它任务，但绝不重复提交。"""
+        status, note = quiz_mod.run_quiz(
+            self.session, self.cfg, self.log, page, self.popup,
+            self.bank, self.online, self.humanizer,
+        )
+        if status in ("manual", "failed") and self._is_unfinished_note(note):
+            self._submit_blocked_ids.add(str(ch.id))
+            self.log.info("  检测到未完成提示 → 重扫当前页，寻找其它未完成任务（本 run 不再自动重提）")
+            r_status, r_note = self._rescan_current_tasks(ch, page)
+            if r_status == "done":
+                note = f"{note}；重扫处理：{r_note}"
+        return status, note
+
+    def _rescan_current_tasks(self, ch, page):
+        """提交被拦截后重扫当前章节：只处理视频/音频/文档，不重复提交题目。"""
+        log = self.log
+        log.info("  重扫当前页：检查视频/音频/文档是否仍未完成；题目项保持人工，不重复提交")
+        done, tried = [], []
+
+        # ① 标签式任务点：逐个打开，跳过题目标签
+        tabs = self._quiz_tabs(page)
+        if tabs:
+            for i in range(len(tabs)):
+                page_i, _ = self._open_chapter(ch)
+                tabs_i = self._quiz_tabs(page_i)
+                if i >= len(tabs_i):
+                    break
+                tframe, tel, ttext, tkind = tabs_i[i]
+                if tkind == "quiz":
+                    log.info(f"   重扫跳过题目标签：{ttext}（不重复提交）")
+                    continue
+                if tkind == "goal":
+                    continue
+                log.info(f"   重扫处理：{ttext}（{tkind}）")
+                try:
+                    page_i, _ = self.session.click_capture(page_i, tel, wait_s=6)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(f"     点击标签失败: {str(exc)[:60]}")
+                page_i.wait_for_timeout(3000)
+                if tkind == "video":
+                    s, n = self._play_video_here(page_i, ch)
+                else:
+                    s, n = self._browse_here(page_i, ch)
+                log.info(f"     重扫结果: {s} | {str(n)[:70]}")
+                tried.append(ttext)
+                if s == "done":
+                    done.append(ttext)
+                if self._verify_chapter(ch, rounds=1) == 0:
+                    return "done", "已全部完成"
+
+        # ② 多页任务点：逐页检查，题目页跳过
+        if not tried:
+            pm = self._page_tabs(page)
+            if pm:
+                for idx in range(len(pm)):
+                    p_i, cards_i = self._open_chapter(ch)
+                    if idx > 0:
+                        if self._goto_page(p_i, idx) is None:
+                            continue
+                        cards_i = course_mod.find_content_frame(p_i)
+                    _, vel = video_mod.find_video_element(p_i, timeout_s=5)
+                    if vel is not None:
+                        s, n = self._play_video_here(p_i, ch)
+                    elif cards_i is not None:
+                        t_i = course_mod.card_type(cards_i)
+                        if t_i == "quiz":
+                            log.info(f"   重扫跳过第 {idx + 1} 页题目（不重复提交）")
+                            continue
+                        if t_i not in ("video", "audio", "document", "read"):
+                            continue
+                        s, n = self._handle_card(p_i, cards_i, t_i, ch)
+                    else:
+                        continue
+                    log.info(f"   重扫第 {idx + 1}/{len(pm)} 页结果: {s} | {str(n)[:70]}")
+                    tried.append(f"第{idx + 1}页")
+                    if s == "done":
+                        done.append(f"第{idx + 1}页")
+                    if self._verify_chapter(ch, rounds=1) == 0:
+                        return "done", "已全部完成"
+
+        # ③ 单内容帧：题目不碰，其它内容处理一次
+        if not tried:
+            cards = course_mod.find_content_frame(page)
+            if cards is not None:
+                ctype = course_mod.card_type(cards)
+                if ctype == "quiz":
+                    log.info("   当前内容帧是题目 → 不重复提交，保持人工")
+                elif ctype in ("video", "audio", "document", "read"):
+                    s, n = self._handle_card(page, cards, ctype, ch)
+                    log.info(f"   重扫结果: {s} | {str(n)[:70]}")
+                    tried.append(TYPE_LABEL.get(ctype, ctype))
+                    if s == "done":
+                        done.append(TYPE_LABEL.get(ctype, ctype))
+
+        if done:
+            return "done", "、".join(done)
+        return "manual", "重扫完成：未发现可自动处理的非题目任务；题目项保持人工"
+
     def _handle_quiz(self, page, ch):
+        if not self._should_handle("quiz"):
+            return "skipped", f"被 --only={self.args.only} 过滤"
+        # 进入本函数前打开的标签页都视为历史页；只允许当前目标页和随后新开的页面。
+        try:
+            initial_pages = list(self.session.context.pages)
+        except Exception:  # noqa: BLE001
+            initial_pages = [page]
         # 1) 答题页往往已自动在某个 frame/标签页里打开（work/doHomeWorkNew）
         for attempt in range(4):
-            host, qf = self._locate_quiz(page)
+            try:
+                new_pages = [p for p in self.session.context.pages if p not in initial_pages]
+            except Exception:  # noqa: BLE001
+                new_pages = []
+            host, qf = self._locate_quiz(page, new_pages)
             if host is not None and host is not page:
                 page = host          # 答题页在新标签 → 切过去
             if qf is not None:
@@ -1221,9 +1821,8 @@ class Runner:
                     page.wait_for_timeout(2000)
                 if ready:
                     self.log.info(f"  答题页已就绪（{qf.url[:70]}），开始处理")
-                    return quiz_mod.run_quiz(
-                        self.session, self.cfg, self.log, qf, self.popup,
-                        self.bank, self.online, self.humanizer,
+                    return self._run_quiz(
+                        qf, ch,
                     )
             if attempt and attempt % 4 == 0:
                 urls = []
@@ -1244,9 +1843,8 @@ class Runner:
                         target, _ = self.session.click_capture(page, el, wait_s=12)
                         target.wait_for_timeout(3500)
                         self.popup.tick(target)
-                        return quiz_mod.run_quiz(
-                            self.session, self.cfg, self.log, target, self.popup,
-                            self.bank, self.online, self.humanizer,
+                        return self._run_quiz(
+                            target, ch,
                         )
                 except Exception:  # noqa: BLE001
                     continue
@@ -1280,48 +1878,56 @@ class Runner:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _verify_chapter(self, ch, rounds=5):
-        """复核知识点状态。
+    # 小圆状态复核：先看章节树的小圆，再用接口兜底；避免固定干等导致“卡住”。
+    STATE_WAIT_S = 180
+    STATE_POLL_S = 3.0
 
-        优先用平台接口（准确），并做延迟重试——实测视频播完后平台登记有延迟，
-        只查一次会误判为"未完成"；页面 DOM 标记同样可能滞后，仅作兜底。
-        rounds=1 时只查一次（多页章节逐页处理时用，避免每页白等）。
-        返回：0=已完成 / >0=未完成数 / -1=无任务点 / None=无法判定
+    def _verify_chapter(self, ch, rounds=5):
+        """复核小圆/平台状态：0=绿色已完成；-1=橙色 0（直接跳过）；>0=仍橙色；None=无法判定。
+
+        rounds=1 用于多页/多标签的快速检查；外层完整复核默认最多等 180 秒。
+        状态出现即返回，不再按固定 15/25/60/90 秒干等。
         """
-        log = self.log
-        delays = (0, 15, 25, 60, 90)[: max(1, int(rounds))]
-        # 1) 接口复核：失败时逐步延长等待（0/15/25 秒快速判定，之后 60/90 秒兜底）
-        #    实测纯视频章节的登记可达 2 分钟以上；成功的通常第一次就返回，不额外耗时。
-        for attempt, delay in enumerate(delays):
-            if delay and attempt:
-                log.info(f"  平台登记可能延迟，{delay} 秒后再次复核（保持页面活跃）…")
-                self._wait_keeping_alive(delay)
+        wait_s = {1: 20}.get(int(rounds), self.STATE_WAIT_S)
+        deadline = time.time() + max(1.0, wait_s)
+        last_hint = None
+        page = self._tree_page()
+        next_api = 0.0
+        while True:
+            self.session.keep_alive()
+            # 1) 用户要求的权威信号：任务点前的小圆
             try:
-                st = course_mod.chapter_status(self.session, self.course, [ch.id], log)
+                dom = course_mod.chapter_state(page, ch.id)
             except Exception:  # noqa: BLE001
-                st = {}
-            v = (st or {}).get(ch.id)
-            if not v:
-                break
-            total = int(v.get("total", 0) or 0)
-            unfinish = int(v.get("unfinish", 0) or 0)
-            if total == 0 and unfinish == 0:
-                course_mod.update_chapter_hint(ch.id, -1)
-                return -1
-            course_mod.update_chapter_hint(ch.id, unfinish)
-            if unfinish == 0:
-                return 0
-            if attempt >= len(delays) - 1:
-                return unfinish          # 全部轮次都未完成 → 确实没完成
-        # 2) DOM 兜底（可能滞后）
-        try:
-            page = self._tree_page()
-            hint = course_mod.chapter_state(page, ch.id)
-            if hint is not None:
-                course_mod.update_chapter_hint(ch.id, hint)
-            return hint
-        except Exception:  # noqa: BLE001
-            return None
+                dom = None
+            if dom is not None:
+                course_mod.update_chapter_hint(ch.id, dom)
+                if dom == 0:
+                    return 0
+                if dom == -1:
+                    return -1
+                last_hint = max(int(dom), 0)
+            # 2) 平台接口兜底（不覆盖小圆已给出的绿色/橙色 0）
+            if time.time() >= next_api:
+                try:
+                    st = course_mod.chapter_status(self.session, self.course, [ch.id], self.log)
+                except Exception:  # noqa: BLE001
+                    st = {}
+                v = (st or {}).get(ch.id)
+                if v:
+                    total = int(v.get("total", 0) or 0)
+                    unfinish = int(v.get("unfinish", 0) or 0)
+                    if total == 0 and unfinish == 0:
+                        course_mod.update_chapter_hint(ch.id, -1)
+                        return -1
+                    if unfinish == 0:
+                        course_mod.update_chapter_hint(ch.id, 0)
+                        return 0
+                    last_hint = max(unfinish, 0)
+                next_api = time.time() + 12.0
+            if time.time() >= deadline:
+                return last_hint
+            time.sleep(min(self.STATE_POLL_S, max(0.2, deadline - time.time())))
 
     # ---------------- 任务中心（教学任务，顺序解锁） ----------------
     def process_task_center(self):
@@ -1346,6 +1952,8 @@ class Runner:
         log.info(f"进入任务中心: {center_url[:80]}")
 
         max_rounds = 200
+        last_card_key = ""
+        same_card_count = 0
         for rnd in range(1, max_rounds + 1):
             self.popup.tick(target)
             self.session.keep_alive()
@@ -1355,12 +1963,25 @@ class Runner:
                 break
             title = self._card_title(card)
             ptype = course_mod.guess_type(title)
+            card_key = f"{ptype}:{title}"
+            if card_key == last_card_key:
+                same_card_count += 1
+                if same_card_count > 1:
+                    log.warning("  同一任务复查后仍未从可执行列表移除 → 停止任务中心，避免死循环")
+                    break
+                log.info("  平台尚未移除上一任务，等待 5 秒后复查一次")
+                target.wait_for_timeout(5000)
+            else:
+                same_card_count = 0
+            last_card_key = card_key
             log.info(f"  [第{rnd}轮] 任务点: {title[:50]} (推断类型 {ptype})")
             task_page, is_new = self.session.click_capture(target, card, wait_s=12)
             task_page.wait_for_timeout(3000)
             self.popup.tick(task_page)
             try:
-                if ptype == "video":
+                if not self._should_handle(ptype):
+                    status, note = "skipped", f"被 --only={self.args.only} 过滤"
+                elif ptype == "video":
                     status, note = video_mod.play_video(
                         self.session, cfg, log, task_page, self.popup, None,
                         keepalive=self._ensure_session,
@@ -1377,6 +1998,9 @@ class Runner:
             log.info(f"     结果: {status} | {note}")
             if is_new:
                 self.session.close_page(task_page)
+            if status in ("failed", "manual", "skipped"):
+                log.warning("  当前任务未完成/未处理 → 停止任务中心，不重复点击同一卡片")
+                break
             # 回到任务中心重新扫描（平台按顺序解锁）
             try:
                 target.goto(center_url, wait_until="domcontentloaded")

@@ -11,7 +11,6 @@
 import json
 import os
 import re
-import time
 import urllib.error
 import urllib.request
 
@@ -78,6 +77,12 @@ class LLMAnswer:
         prompt = self._build_prompt(stem, options, qtype)
         last_reason = ""
         for attempt in (1, 2):
+            # 解析失败后的第二次请求也占用额度；剩余次数不足时不再重试。
+            ok, why = self.available()
+            if not ok:
+                return None, 0.0, last_reason or why
+            if attempt == 2:
+                self.log.info(f"  大模型返回不可用（第 1 次）：{last_reason or '未给出可用答案'}，重试一次")
             raw = self._chat(prompt)
             ans, conf, reason = self._parse(raw, options, qtype)
             if ans:
@@ -86,9 +91,6 @@ class LLMAnswer:
             last_reason = reason or last_reason
             if self.fatal:          # Key/余额问题，重试也是同样结果
                 return None, 0.0, self.fatal
-            if attempt == 1:
-                self.log.info(f"  大模型返回不可用（第 1 次）：{reason or str(raw)[:50]}，重试一次")
-                time.sleep(1.0)
         return None, 0.0, last_reason or "模型未给出可用答案"
 
     def _build_prompt(self, stem, options, qtype):
@@ -198,6 +200,10 @@ class LLMAnswer:
         reason = str(obj.get("reason") or "")[:60]
         if not ans:
             return None, 0.0, reason
+
+        # 填空题的 answer 是正文而不是选项字母；即使页面没有 options 也应保留。
+        if qtype == "text":
+            return ans, conf, reason
 
         n = len(options or [])
         if qtype == "judge":

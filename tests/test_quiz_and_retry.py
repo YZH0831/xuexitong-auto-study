@@ -122,7 +122,7 @@ print("[3] 题库防污染 OK（已验证优先，联网答案不覆盖）")
 cfg = Config(load_config(str(CFG_PATH)))
 cfg["safety"]["retry_rounds"] = 2
 args = argparse.Namespace(select="", pick=False, list_courses=False, dry_run=False,
-                          only="", headless=True, course="", config="config.yaml")
+                          only="quiz", headless=True, course="", config="config.yaml")
 runner = Runner(cfg, log, args)
 runner.report = Report("某测试课", ROOT / "output", log)
 runner.session = type("S", (), {"probe_session": lambda self, *a, **k: "ok", "page": None})()
@@ -156,5 +156,100 @@ assert attempts["c"] == 3, f"c 应重试到上限（1+2 轮），实际 {attempt
 assert [c.id for c in runner.failed_chapters] == ["c"], "最终仍未完成的应只剩 c"
 print(f"[4] 失败重试 OK（处理次数 a={attempts['a']} b={attempts['b']} c={attempts['c']}；"
       f"重试上限 {cfg.safety.retry_rounds} 轮，仍失败的不静默跳过，会在结尾明确列出）")
+
+# ---------------- 5) 小圆门控：绿色才下一个；橙色 0 跳过；橙色 N 停止 ----------------
+cfg_gate = Config(load_config(str(CFG_PATH)))
+args_gate = argparse.Namespace(select="", pick=False, list_courses=False, dry_run=False,
+                               only="", headless=True, course="", config="config.yaml")
+runner_gate = Runner(cfg_gate, log, args_gate)
+runner_gate.report = Report("某测试课", ROOT / "output", log)
+runner_gate.session = type("S", (), {"probe_session": lambda self, *a, **k: "ok", "page": None})()
+runner_gate.course = type("C", (), {"name": "某测试课", "course_id": "1", "clazzid": "2", "cpi": "3"})()
+runner_gate.humanizer = type("H", (), {"scroll": lambda self, p=None: None,
+                                       "task_interval": lambda self, s=0: None})()
+runner_gate._refresh_platform_progress = lambda chapters, quiet=False: None
+
+gate_chapters = [
+    Chapter("skip0", "橙色0", None, -1),
+    Chapter("done", "绿色", None, 0),
+    Chapter("pending", "橙色1", None, 1),
+]
+gate_attempts = {"skip0": 0, "done": 0, "pending": 0}
+
+
+def gate_process(ch):
+    gate_attempts[ch.id] += 1
+    if ch.id == "pending":
+        ch.hint = 1
+        runner_gate.failed_chapters.append(ch)
+        runner_gate.failed_this_run.append(ch.title)
+        return "failed"
+    return "done"
+
+
+runner_gate.process_chapter = gate_process
+runner_gate._run_rounds(gate_chapters)
+
+assert gate_attempts == {"skip0": 0, "done": 0, "pending": 1}, gate_attempts
+assert [c.id for c in runner_gate.failed_chapters] == ["pending"]
+print("[5] 小圆门控 OK（橙色0直接跳过 / 绿色通过 / 橙色1停止，不进入下一个）")
+
+# ---------------- 5b) 占位章节例外：本次跳过，不因橙色1卡住 ----------------
+cfg_ph = Config(load_config(str(CFG_PATH)))
+args_ph = argparse.Namespace(select="", pick=False, list_courses=False, dry_run=False,
+                             only="", headless=True, course="", config="config.yaml")
+runner_ph = Runner(cfg_ph, log, args_ph)
+runner_ph.report = Report("某测试课", ROOT / "output", log)
+runner_ph.session = type("S", (), {"probe_session": lambda self, *a, **k: "ok", "page": None})()
+runner_ph.course = type("C", (), {"name": "某测试课", "course_id": "1", "clazzid": "2", "cpi": "3"})()
+runner_ph.humanizer = type("H", (), {"scroll": lambda self, p=None: None,
+                                     "task_interval": lambda self, s=0: None})()
+runner_ph._refresh_platform_progress = lambda chapters, quiet=False: None
+ph_chapters = [Chapter("ph", "敬请期待", None, 1)]
+ph_calls = {"n": 0}
+
+
+def ph_process(ch):
+    ph_calls["n"] += 1
+    ch.hint = 1
+    runner_ph._placeholder_skip = True
+    return "skipped"
+
+
+runner_ph.process_chapter = ph_process
+runner_ph._run_rounds(ph_chapters)
+assert ph_calls == {"n": 1}, ph_calls
+assert runner_ph.failed_chapters == [], runner_ph.failed_chapters
+print("[5b] 占位章节例外 OK（本次跳过，不卡门控；下次运行仍重新探测）")
+
+# ---------------- 5c) 平台拦截提交：本 run 不再自动重提 ----------------
+cfg_block = Config(load_config(str(CFG_PATH)))
+args_block = argparse.Namespace(select="", pick=False, list_courses=False, dry_run=False,
+                                only="", headless=True, course="", config="config.yaml")
+runner_block = Runner(cfg_block, log, args_block)
+runner_block.report = Report("某测试课", ROOT / "output", log)
+runner_block.session = type("S", (), {"probe_session": lambda self, *a, **k: "ok", "page": None})()
+runner_block.course = type("C", (), {"name": "某测试课", "course_id": "1", "clazzid": "2", "cpi": "3"})()
+runner_block.humanizer = type("H", (), {"scroll": lambda self, p=None: None,
+                                        "task_interval": lambda self, s=0: None})()
+runner_block._refresh_platform_progress = lambda chapters, quiet=False: None
+block_ch = Chapter("blocked", "被拦截题目", None, 1)
+block_calls = {"n": 0}
+
+
+def blocked_process(ch):
+    block_calls["n"] += 1
+    ch.hint = 1
+    runner_block._submit_blocked_ids.add(str(ch.id))
+    runner_block.failed_chapters.append(ch)
+    runner_block.failed_this_run.append(ch.title)
+    return "manual"
+
+
+runner_block.process_chapter = blocked_process
+runner_block._run_rounds([block_ch])
+assert block_calls == {"n": 1}, f"提交被拦截后不应自动重试，实际处理 {block_calls['n']} 次"
+assert runner_block.failed_chapters and runner_block.failed_chapters[0].id == "blocked"
+print("[5c] 防重复提交 OK（平台拦截后本 run 不再自动重提，结尾仍明确列出待人工）")
 
 print("\n[OK] 判断题 / 重试 / 题库防污染 测试全部通过")

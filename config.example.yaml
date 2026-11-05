@@ -51,9 +51,9 @@ login:
 
 # ========== 视频 ==========
 video:
-  speed: 1.0                    # 播放倍速。实测倍速普遍不被平台登记（按真实时间核验），默认 1.0；
-                                # 若设为 >1 且平台未登记，程序会自动用 1 倍速重播一次
-  duration_required_1x: true    # 是否强制：有时长要求的视频必须真实 1 倍速播放（平台按真实时间计）
+  speed: 3.0                    # 默认从 3x 开始探测，选播放器实际支持的最高档；
+                                # 平台明确“禁止倍速”时仍强制 1x
+  duration_required_1x: true    # 有“禁止倍速/累计观看 N 分钟”要求时强制真实 1 倍速
   timeout_per_video_min: 120    # 单个视频最长等待(分钟)
   poll_interval_s: 3            # 播放状态轮询间隔(秒)
 
@@ -80,6 +80,7 @@ quiz:
   # 多个 provider 按顺序尝试，命中即止
   tiku:
     enabled: false                # 填好 token/url 后改 true
+    auto_start: true              # 本地 tikuAdapter 未启动时自动拉起（Windows 工具目录）
     timeout_s: 12
     max_calls: 300                # 单次运行最多查询次数
     min_stem_len: 6               # 题干太短不查（易误命中）

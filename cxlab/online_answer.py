@@ -481,6 +481,11 @@ class OnlineAnswer:
     def _fetch_text(self, context, query, engine=None):
         """打开搜索引擎取回页面文本；被限流/验证码时自动降级到下一个引擎。"""
         for eng in self._engine_chain(engine):
+            # 引擎回退与简化查询同样消耗额度，不能只在 search() 入口检查一次。
+            ok, why = self.can_search()
+            if not ok:
+                self.log.info(f"  联网搜题停止：{why}")
+                break
             self._throttle()
             url = ENGINES.get(eng, ENGINES["bing"]).format(q=urllib.parse.quote(query))
             text = ""

@@ -116,7 +116,8 @@ def relogin(session, cfg, log):
     log.warning("请在浏览器中扫码登录（等待 %d 秒），扫码后可自动继续任务",
                 int(cfg.login.qr_wait_s))
     try:
-        if do_login(session, cfg, log):
+        # 密码重登失败后的兜底必须强制使用二维码；不能再次读取 password 配置。
+        if do_login(session, cfg, log, method="qr", qr_timeout_s=cfg.login.qr_wait_s):
             log.info("扫码重新登录成功，继续任务")
             return True
     except Exception as exc:  # noqa: BLE001
@@ -124,9 +125,9 @@ def relogin(session, cfg, log):
     return False
 
 
-def do_login(session, cfg, log):
+def do_login(session, cfg, log, method=None, qr_timeout_s=None):
     page = session.page
-    method = cfg.account.login_method
+    method = method or cfg.account.login_method
     if not open_login_page(session, cfg, log):
         return False
     log.info(f"登录方式: {'二维码扫码' if method == 'qr' else '手机号+密码'}")
@@ -152,8 +153,9 @@ def do_login(session, cfg, log):
                         break
                 except Exception:  # noqa: BLE001
                     continue
-        log.info(f"请用【学习通 APP】扫描浏览器中的二维码登录（最多等待 {cfg.login.qr_timeout_s} 秒）")
-        ok = _wait_login_success(session, int(cfg.login.qr_timeout_s), log)
+        wait_s = int(qr_timeout_s if qr_timeout_s is not None else cfg.login.qr_timeout_s)
+        log.info(f"请用【学习通 APP】扫描浏览器中的二维码登录（最多等待 {wait_s} 秒）")
+        ok = _wait_login_success(session, wait_s, log)
     else:
         ok = _password_login(session, cfg, log)
 

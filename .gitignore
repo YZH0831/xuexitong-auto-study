@@ -12,6 +12,8 @@ output/
 # 自动沉淀的题库（含你课程的真实题目与答案）
 data/question_pool.json
 data/*.local.json
+# tikuAdapter 本地服务：二进制较大，题库/日志含真实题目
+tools/tikuAdapter/
 .env
 *.key
 *.pem

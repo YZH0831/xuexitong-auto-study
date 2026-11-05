@@ -27,6 +27,8 @@ from cxlab import reasoning as R          # noqa: E402
 import cxlab.quiz as Q                    # noqa: E402
 from cxlab.config import Config, load_config  # noqa: E402
 
+_REAL_SUBMIT_QUIZ = Q.submit_quiz
+
 # ---------- 1) best_guess 覆盖各类题型 ----------
 sing = [{"text": "为人民服务", "letter": "A"},
         {"text": "为个人利益", "letter": "B"},
@@ -164,5 +166,43 @@ class HintPage(FakePage):
 
 assert "未作答" in Q._unanswered_hint(HintPage())
 print("[3] 拦截提示解析  OK →", Q._unanswered_hint(HintPage()))
+
+
+# ---------- 4) 平台拦截后立即停止，不重复点提交 ----------
+class BlockedButton:
+    def __init__(self, counter):
+        self.counter = counter
+
+    def is_visible(self):
+        return True
+
+    def click(self, timeout=None):
+        self.counter["submit"] += 1
+
+    def inner_text(self):
+        return "提交"
+
+
+class BlockedPage:
+    def __init__(self, counter):
+        self.counter = counter
+        self.frames = [self]
+
+    def wait_for_timeout(self, ms):
+        return None
+
+    def query_selector(self, sel, *a, **k):
+        if "提交" in sel or "submit" in sel.lower():
+            return BlockedButton(self.counter)
+        return None
+
+    def evaluate(self, *a, **k):
+        return "温馨提示：还有 2 道题未作答，请答完再提交"
+
+
+clicks = {"submit": 0}
+assert _REAL_SUBMIT_QUIZ(BlockedPage(clicks), log) is False
+assert clicks["submit"] == 1, f"平台拦截后不应重复提交，实际点击 {clicks['submit']} 次"
+print("[4] 平台拦截提交 OK → 只点 1 次，立即停止并转重扫/人工")
 
 print("\n全部通过。")

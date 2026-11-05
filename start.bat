@@ -10,6 +10,16 @@ if not exist "%PY%" (
   exit /b 1
 )
 
+set "DIRECT=0"
+if /i "%~1"=="run"   set "DIRECT=1"
+if /i "%~1"=="dry"   set "DIRECT=1"
+if /i "%~1"=="quiz"  set "DIRECT=1"
+if /i "%~1"=="video" set "DIRECT=1"
+if /i "%~1"=="pick"  set "DIRECT=1"
+if /i "%~1"=="list"  set "DIRECT=1"
+if /i "%~1"=="key"   set "DIRECT=1"
+if /i "%~1"=="tiku"  set "DIRECT=1"
+if /i "%~1"=="doctor" set "DIRECT=1"
 if /i "%~1"=="run"   goto run
 if /i "%~1"=="dry"   goto dry
 if /i "%~1"=="quiz"  goto quiz
@@ -76,34 +86,43 @@ goto menu
 echo.
 echo === 试运行：扫描结构（可能需要扫码登录） ===
 "%PY%" main.py --config config.yaml --dry-run
+set "RC=%ERRORLEVEL%"
 echo.
 pause
+if "%DIRECT%"=="1" exit /b %RC%
 goto menu
 
 :run
 echo.
 "%PY%" tools\set_key_gui.py --has-key >nul 2>&1
+set "RC=%ERRORLEVEL%"
 if errorlevel 1 echo    [提示] 大模型未启用 —— 答不出的题走题库/搜题/兜底推理
 echo === 正式运行 ===
 "%PY%" main.py --config config.yaml
+set "RC=%ERRORLEVEL%"
 echo.
 pause
+if "%DIRECT%"=="1" exit /b %RC%
 goto menu
 
 :vid
 echo.
 echo === 只刷视频/音频 ===
 "%PY%" main.py --config config.yaml --only video
+set "RC=%ERRORLEVEL%"
 echo.
 pause
+if "%DIRECT%"=="1" exit /b %RC%
 goto menu
 
 :quiz
 echo.
 echo === 只做章节测验 ===
 "%PY%" main.py --config config.yaml --only quiz
+set "RC=%ERRORLEVEL%"
 echo.
 pause
+if "%DIRECT%"=="1" exit /b %RC%
 goto menu
 
 :pick
@@ -113,16 +132,20 @@ echo   步骤1：输入课程字母（可多选：A C F / A-C / 1,3 / all）
 echo   步骤2：选择课时范围（1=全部 2=统一指定 3=逐门指定）
 echo   步骤3：确认执行计划
 "%PY%" main.py --config config.yaml --pick
+set "RC=%ERRORLEVEL%"
 echo.
 pause
+if "%DIRECT%"=="1" exit /b %RC%
 goto menu
 
 :list
 echo.
 echo === 我的课程 ===
 "%PY%" main.py --config config.yaml --list-courses
+set "RC=%ERRORLEVEL%"
 echo.
 pause
+if "%DIRECT%"=="1" exit /b %RC%
 goto menu
 
 :rep
@@ -143,6 +166,7 @@ if exist "state\storage_state.json" (
 )
 echo.
 pause
+if "%DIRECT%"=="1" exit /b %RC%
 goto menu
 
 :setkey
@@ -150,6 +174,7 @@ echo.
 echo === 设置大模型答题密钥 ===
 echo    （关掉设置窗口后会自动回到菜单）
 call "%CD%\SetDeepSeekKey.bat"
+set "RC=%ERRORLEVEL%"
 if errorlevel 1 (
   echo.
   echo [!] 没能打开图形界面（缺少带 tkinter 的 Python）。
@@ -158,6 +183,7 @@ if errorlevel 1 (
   echo.
   pause
 )
+if "%DIRECT%"=="1" exit /b %RC%
 goto menu
 
 :settiku
@@ -165,6 +191,7 @@ echo.
 echo === 配置第三方题库 ===
 echo    （关掉设置窗口后会自动回到菜单）
 call "%~dp0SetTiku.bat"
+set "RC=%ERRORLEVEL%"
 if errorlevel 1 (
   echo.
   echo [!] 没能打开图形界面，可改用命令行：
@@ -172,14 +199,17 @@ if errorlevel 1 (
   echo.
   pause
 )
+if "%DIRECT%"=="1" exit /b %RC%
 goto menu
 
 :doctor
 echo.
 echo === 环境自检 ===
 "%PY%" tools\doctor.py
+set "RC=%ERRORLEVEL%"
 echo.
 pause
+if "%DIRECT%"=="1" exit /b %RC%
 goto menu
 
 :end

@@ -73,8 +73,8 @@ def main():
     log.info(f"学习通自动学习程序启动 | 课程关键词: {cfg.course.name_contains or cfg.course.url}")
     log.info(f"运行模式: {'DRY-RUN(仅扫描)' if args.dry_run else '正式运行'}")
     log.info("=" * 60)
-    Runner(cfg, log, args).run()
+    return Runner(cfg, log, args).run()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

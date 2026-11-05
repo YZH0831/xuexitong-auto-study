@@ -76,6 +76,7 @@ def _find_block(lines, parent="quiz", key="tiku"):
 def render_tiku_block(enabled, providers, indent=2):
     pad = " " * indent
     out = [f"{pad}tiku:\n", f"{pad}  enabled: {'true' if enabled else 'false'}\n",
+           f"{pad}  auto_start: true\n",
            f"{pad}  timeout_s: 12\n", f"{pad}  max_calls: 300\n",
            f"{pad}  min_stem_len: 6\n"]
     if not providers:
@@ -88,6 +89,8 @@ def render_tiku_block(enabled, providers, indent=2):
             out.append(f"{pad}      token: {json.dumps(p['token'], ensure_ascii=False)}\n")
         if p.get("url"):
             out.append(f"{pad}      url: {json.dumps(p['url'], ensure_ascii=False)}\n")
+        if p.get("use"):
+            out.append(f"{pad}      use: {json.dumps(p['use'], ensure_ascii=False)}\n")
     return out
 
 
@@ -135,7 +138,8 @@ def load_tiku(path=None):
         elif s.startswith("- type:"):
             cur = {"type": s.split(":", 1)[1].split("#")[0].strip().strip('"')}
             info["providers"].append(cur)
-        elif cur is not None and (s.startswith("token:") or s.startswith("url:")):
+        elif cur is not None and (s.startswith("token:") or s.startswith("url:")
+                                  or s.startswith("use:")):
             k, v = s.split(":", 1)
             v = v.split("#")[0].strip().strip('"').strip("'")
             cur[k] = v
@@ -227,6 +231,8 @@ def main_ui():
                 continue
             item = {"type": ptype}
             item[field] = val
+            if by_type.get(ptype, {}).get("use"):
+                item["use"] = by_type[ptype]["use"]
             if field == "token":
                 # tikuadapter 只需要 url；icodef/enncy 只需要 token
                 pass

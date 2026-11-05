@@ -57,23 +57,10 @@ DEFAULTS = {
         "net_retry_delays_s": [15, 30, 60, 120, 300],   # 断网重试退避序列（秒）
         "qr_wait_s": 300,                # 需人工扫码时的等待时长（秒）
     },
-    # ---- 大模型答题（OpenAI 兼容接口；不填 Key 则自动跳过）----
-    "llm": {
-        "enabled": False,
-        "base_url": "https://api.deepseek.com/v1",
-        "api_key": "",
-        "model": "deepseek-flash",
-        "reasoning_effort": "",
-        "min_confidence": 0.55,
-        "timeout_s": 30,
-        "max_calls": 200,
-        "temperature": 0,
-        "cross_check_with_search": False,   # 大模型答完后是否再用联网搜索交叉验证（更准但更慢）
-    },
     "video": {
-        # 实测（2026-10-14）：倍速播放普遍**不被平台登记**（平台按真实时间核验），
-        # 因此默认 1.0；设为 >1 时若平台未登记，程序会自动用 1 倍速重播一次。
-        "speed": 1.0,
+        # 每个视频开始前探测播放器倍速能力；平台明确写“禁止倍速”时才锁 1x。
+        # 完成后按页面完成线（常见 90%）停止，不再一律播到 100%。
+        "speed": 3.0,
         "duration_required_1x": True,
         "timeout_per_video_min": 120,
         "poll_interval_s": 3,
@@ -85,6 +72,19 @@ DEFAULTS = {
         "max_seconds": 900,
     },
     "quiz": {
+        # ---- 大模型答题（OpenAI 兼容接口；不填 Key 则自动跳过）----
+        "llm": {
+            "enabled": False,
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "",
+            "model": "deepseek-flash",
+            "reasoning_effort": "",
+            "min_confidence": 0.55,
+            "timeout_s": 30,
+            "max_calls": 200,
+            "temperature": 0,
+            "cross_check_with_search": False,
+        },
         "on_unknown": "pause",
         "pause_timeout_s": 900,
         "max_attempts": 1,
@@ -95,6 +95,7 @@ DEFAULTS = {
         # ---- 第三方题库接口（比网页搜索准得多，命中率 90%+；命中即止）----
         "tiku": {
             "enabled": False,          # 填好 provider/token 后改 true
+            "auto_start": True,        # 本地 tikuAdapter 未启动时自动拉起
             "timeout_s": 12,
             "max_calls": 300,          # 单次运行最多查询次数
             "min_stem_len": 6,         # 题干太短不查（容易误命中）
@@ -182,7 +183,7 @@ def _resolve_relative(cfg, base):
         p = Path(str(cfg[key]))
         if not p.is_absolute():
             cfg[key] = str((base / p).resolve())
-    for key in ("answers_file", "pool_file"):
+    for key in ("answers_file", "pool_file", "font_table"):
         p = Path(str(cfg["quiz"][key]))
         if not p.is_absolute():
             cfg["quiz"][key] = str((base / p).resolve())

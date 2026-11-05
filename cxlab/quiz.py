@@ -740,7 +740,8 @@ def submit_quiz(page, log, humanizer=None):
             return True
         hint = _unanswered_hint(page)
         if hint:
-            log.warning(f"  平台拦截提交：{hint} → 还有空题，必须补答后再交")
+            log.warning(f"  平台拦截提交：{hint} → 不再重复提交；转去重扫页面剩余任务/人工处理")
+            return False
         log.info(f"  第 {attempt} 次提交后仍检测到提交按钮 → 重试")
         again = _submit_button(page)
         if again is not None:
@@ -1086,6 +1087,8 @@ def run_quiz(session, cfg, log, page, popup, bank, online=None, humanizer=None):
         # 页面上根本没有提交按钮（不是点了失败）→ 跳过本节，不进入复核等待
         return "skipped", "未找到提交按钮 → 跳过本节，直接进入下一节"
     if not submitted:
+        if _unanswered_hint(page):
+            return "manual", "提交被拦截：仍有题目未作答 → 不重复提交，等待重扫/人工"
         return "failed", "点击提交失败，需人工提交"
     score = read_result(page, questions, bank, log)
     note = "已提交"

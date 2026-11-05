@@ -740,10 +740,14 @@ def choose_courses(session, cfg, log, cli_select=""):
 
     # 2) 决定选择来源
     tokens = split_tokens(cli_select) or split_tokens(cfg.course.selected_courses)
-    all_mode = False
-    if not tokens:
+    # 显式 --select all / "*" 与默认 name_contains="*" 必须走同一全选逻辑；
+    # 否则 "all" 会被误当成课程名关键词，最终提示没有课程匹配。
+    all_mode = len(tokens) == 1 and is_all_spec(tokens[0])
+    if all_mode:
+        tokens = []
+    elif not tokens:
         kw = str(cfg.course.name_contains or "").strip()
-        all_mode = kw in ("", "*", "all", "ALL", "全部")
+        all_mode = is_all_spec(kw)
         tokens = [] if all_mode else split_tokens(kw)
 
     # 3) 交互勾选 / 全选 / 关键词匹配
@@ -835,14 +839,16 @@ def find_chapters_frame(page, use_cache=True):
         cached = _FRAME_CACHE.get("frame")
         if cached is not None:
             try:
-                if cached.query_selector('div.chapter_item[id^="cur"], a[href*="chapterId"]') is not None:
+                if cached.query_selector('div.chapter_item[id^="cur"], a[href*="chapterId"], .posCatalog_select') is not None:
                     return cached
             except Exception:  # noqa: BLE001
                 pass
             _FRAME_CACHE["frame"] = None
     for frame in all_frames(page):
         try:
-            el = frame.query_selector('div.chapter_item[id^="cur"], a[href*="chapterId"], a[href*="knowledgeId"]')
+            el = frame.query_selector(
+                'div.chapter_item[id^="cur"], a[href*="chapterId"], a[href*="knowledgeId"], .posCatalog_select'
+            )
         except Exception:  # noqa: BLE001
             continue
         if el is not None:
@@ -863,7 +869,7 @@ def find_content_frame(page):
 
 
 def chapter_element(page, cid):
-    """定位指定章节的可点击元素（优先在缓存的树帧里找，通常 1 次 CDP 命中）。"""
+    """定位指定章节的可点击元素（旧版 id / 新版侧边栏都支持）。"""
     frames = []
     cached = _FRAME_CACHE.get("frame")
     if cached is not None:
@@ -877,6 +883,11 @@ def chapter_element(page, cid):
             el = frame.query_selector(f'a[href*="chapterId={cid}"], a[href*="knowledgeId={cid}"]')
             if el is not None:
                 return frame, el
+            # 新版 posCatalog 侧边栏不一定有稳定 id；先由 JS 标记目标节点再取回。
+            if frame.evaluate(JS_MARK_CHAPTER, str(cid)):
+                el = frame.query_selector('[data-cx-target="1"]')
+                if el is not None:
+                    return frame, el
         except Exception:  # noqa: BLE001
             continue
     return None, None
@@ -962,7 +973,27 @@ def goto_toc(session, course, log):
 # ---------------- 章节树 ----------------
 JS_CHAPTERS = r"""
 () => {
+  const stateOf = (task) => {
+    if (!task) return null;
+    const cls = (task.className || '').toString().toLowerCase();
+    const txt = (task.innerText || '').trim();
+    const green = task.matches('.icon_yiwanc, .icon_Completed')
+      || /icon_yiwanc|icon_completed/.test(cls)
+      || txt.includes('已完成');
+    const badge = task.querySelector('.catalog_points_yi, .orangeNew, .jobUnfinishCount');
+    let n = null;
+    if (badge) {
+      const raw = (badge.tagName === 'INPUT' ? badge.value : badge.innerText || '').trim();
+      if (/^\d+$/.test(raw)) n = parseInt(raw, 10);
+    }
+    if (green) return {state: 'green', hint: 0};
+    if (/catalog_jindu/.test(cls) || badge || /orangeNew|catalog_points_yi/.test(task.outerHTML || '')) {
+      if (n !== null) return {state: 'orange', hint: n};
+    }
+    return null;
+  };
   const out = [];
+  // 旧版章节树：div#curXXX + catalog_state/catalog_jindu
   document.querySelectorAll('div.chapter_item[id^="cur"]').forEach((el) => {
     const m = /cur(\d+)/.exec(el.id || '');
     let cid = m ? m[1] : '';
@@ -973,24 +1004,34 @@ JS_CHAPTERS = r"""
     }
     if (!cid) return;
     const nameEl = el.querySelector('.catalog_name');
-    const jd = el.querySelector('.catalog_jindu');
-    let hint = null;
-    if (jd) {
-      const cls = (jd.className || '').toString().toLowerCase();
-      const txt = (jd.innerText || '').trim();
-      if (/^\d+$/.test(txt)) {
-        hint = parseInt(txt, 10);                       // 旧版：橙色数字 = 未完成任务点数
-      } else if (/openlock|wancheng|complete|finish|done/.test(cls)) {
-        hint = 0;                                       // 已完成（绿色）
-      } else if (/bukaifang|chuangguan|catalog_tishi|weikaifa|tishi/.test(cls)) {
-        hint = 1;                                       // 新版图标：待完成（橙/灰）
-      }
-    }
+    const state = stateOf(el.querySelector('.catalog_state, .catalog_jindu'));
+    if (state && state.state === 'orange' && state.hint === 0) state.hint = -1;
     const raw = (nameEl ? nameEl.innerText : el.innerText) || '';
     out.push({
       id: cid,
       title: raw.replace(/\s+/g, ' ').trim().slice(0, 60),
-      hint: hint
+      hint: state ? state.hint : null,
+      state: state ? state.state : null
+    });
+  });
+  if (out.length) return out;
+  // 新版侧边栏：posCatalog_select + icon_Completed / orangeNew / catalog_points_yi
+  document.querySelectorAll('.posCatalog_select:not(.firstLayer)').forEach((el) => {
+    const attr = el.getAttribute('data-knowledgeid') || el.getAttribute('data-id')
+      || el.getAttribute('onclick') || el.id || '';
+    const m = /(\d{7,})/.exec(attr || '');
+    const cid = m ? m[1] : '';
+    if (!cid) return;
+    const nameEl = el.querySelector('.posCatalog_name');
+    const task = el.querySelector('.catalog_task, .catalog_state, .catalog_jindu') || el;
+    const state = stateOf(task);
+    if (state && state.state === 'orange' && state.hint === 0) state.hint = -1;
+    const raw = (nameEl ? nameEl.innerText : el.innerText) || '';
+    out.push({
+      id: cid,
+      title: raw.replace(/\s+/g, ' ').trim().slice(0, 60),
+      hint: state ? state.hint : null,
+      state: state ? state.state : null
     });
   });
   return out;
@@ -1004,16 +1045,69 @@ _FRAME_CACHE = {"frame": None}
 
 JS_ONE_CHAPTER = r"""
 (cid) => {
-  const el = document.querySelector('#cur' + cid);
+  const stateOf = (task) => {
+    if (!task) return null;
+    const cls = (task.className || '').toString().toLowerCase();
+    const txt = (task.innerText || '').trim();
+    const green = task.matches('.icon_yiwanc, .icon_Completed')
+      || /icon_yiwanc|icon_completed/.test(cls)
+      || txt.includes('已完成');
+    const badge = task.querySelector('.catalog_points_yi, .orangeNew, .jobUnfinishCount');
+    let n = null;
+    if (badge) {
+      const raw = (badge.tagName === 'INPUT' ? badge.value : badge.innerText || '').trim();
+      if (/^\d+$/.test(raw)) n = parseInt(raw, 10);
+    }
+    if (green) return {state: 'green', hint: 0};
+    if (/catalog_jindu/.test(cls) || badge || /orangeNew|catalog_points_yi/.test(task.outerHTML || '')) {
+      if (n !== null) return {state: 'orange', hint: n};
+    }
+    return null;
+  };
+  let el = document.querySelector('#cur' + cid);
+  if (!el) {
+    el = document.querySelector(
+      '.posCatalog_select[data-knowledgeid="' + cid + '"],'
+      + '.posCatalog_select[data-id="' + cid + '"],'
+      + '.posCatalog_select#' + cid
+    );
+  }
+  if (!el) {
+    el = Array.from(document.querySelectorAll('.posCatalog_select')).find((x) => {
+      const blob = (x.getAttribute('onclick') || '') + (x.id || '')
+        + (x.getAttribute('data-knowledgeid') || '') + (x.getAttribute('data-id') || '');
+      return blob.includes(String(cid));
+    });
+  }
   if (!el) return null;
-  const jd = el.querySelector('.catalog_state, .catalog_jindu');
-  if (!jd) return null;
-  const cls = (jd.className || '').toString().toLowerCase();
-  const txt = (jd.innerText || '').trim();
-  if (/^\d+$/.test(txt)) return parseInt(txt, 10);
-  if (/openlock|wancheng|complete|finish|done/.test(cls)) return 0;
-  if (/bukaifang|chuangguan|catalog_tishi|weikaifa|tishi/.test(cls)) return 1;
-  return null;
+  const state = stateOf(el.querySelector('.catalog_state, .catalog_jindu, .catalog_task') || el);
+  if (!state) return null;
+  if (state.state === 'orange' && state.hint === 0) return -1;
+  return state.hint;
+}
+"""
+
+
+JS_MARK_CHAPTER = r"""
+(cid) => {
+  let el = document.querySelector('#cur' + cid);
+  if (!el) {
+    el = document.querySelector(
+      '.posCatalog_select[data-knowledgeid="' + cid + '"],'
+      + '.posCatalog_select[data-id="' + cid + '"],'
+      + '.posCatalog_select#' + cid
+    );
+  }
+  if (!el) {
+    el = Array.from(document.querySelectorAll('.posCatalog_select')).find((x) => {
+      const blob = (x.getAttribute('onclick') || '') + (x.id || '')
+        + (x.getAttribute('data-knowledgeid') || '') + (x.getAttribute('data-id') || '');
+      return blob.includes(String(cid));
+    });
+  }
+  if (!el) return false;
+  el.setAttribute('data-cx-target', '1');
+  return true;
 }
 """
 
@@ -1052,17 +1146,25 @@ def _js_chapters(frame):
 
 
 def _hint_from_item(el):
-    """从章节点读取完成状态：0=已完成；>0=未完成任务点数；None=未知。"""
+    """从章节点读取小圆状态：0=绿色；>0=橙色待完成；-1=橙色 0；None=未知。"""
     try:
-        jd = el.query_selector(".catalog_jindu")
-        if jd is None:
+        task = el.query_selector(".catalog_state, .catalog_jindu, .catalog_task")
+        if task is None:
             return None
-        cls = (jd.get_attribute("class") or "").lower()
-        text = (jd.inner_text() or "").strip()
-        if any(k in cls for k in ("openlock", "complete", "finish", "done")):
+        cls = (task.get_attribute("class") or "").lower()
+        inner = (task.inner_text() or "").strip()
+        if "icon_yiwanc" in cls or "icon_completed" in cls or "已完成" in inner:
             return 0
-        if text.isdigit():
-            return int(text)
+        badge = task.query_selector(".catalog_points_yi, .orangeNew, .jobUnfinishCount")
+        raw = ""
+        if badge is not None:
+            tag = (badge.evaluate("e => e.tagName") or "").lower()
+            raw = str(badge.get_attribute("value") or "") if tag == "input" else (badge.inner_text() or "")
+        elif task.evaluate("e => e.matches('.catalog_jindu')"):
+            raw = inner
+        raw = (raw or "").strip()
+        if raw.isdigit():
+            return -1 if int(raw) == 0 else int(raw)
     except Exception:  # noqa: BLE001
         pass
     return None

@@ -30,6 +30,18 @@ TYPE_LABEL = {
 ROOT = Path(__file__).resolve().parent.parent
 
 
+class _FrameScope:
+    """把播放器限制到单个任务卡 iframe，但鼠标/弹窗/页面属性仍走真实 page。"""
+
+    def __init__(self, page, frame):
+        self._page = page
+        self.frames = [frame]
+        self.main_frame = frame
+
+    def __getattr__(self, name):
+        return getattr(self._page, name)
+
+
 class Runner:
     def __init__(self, cfg, log, args):
         self.cfg = cfg
@@ -1293,6 +1305,80 @@ class Runner:
             self.log.debug(f"  答题入口[{desc}]未打开答题页 → 换下一个候选")
         return None
 
+    def _frame_of_iframe(self, page, iframe):
+        """拿到任务卡 iframe 的 content_frame；必要时点一下触发懒加载。"""
+        if iframe is None:
+            return None
+        try:
+            frame = iframe.content_frame()
+        except Exception:  # noqa: BLE001
+            frame = None
+        if frame is not None:
+            return frame
+        for _ in range(4):
+            try:
+                iframe.scroll_into_view_if_needed(timeout=2500)
+                iframe.click(timeout=2500)
+            except Exception:  # noqa: BLE001
+                pass
+            page.wait_for_timeout(1200)
+            try:
+                frame = iframe.content_frame()
+            except Exception:  # noqa: BLE001
+                frame = None
+            if frame is not None:
+                return frame
+        return None
+
+    def _process_attachment_cards(self, ch, page, cards):
+        """逐张处理知识点内的未完成任务卡。
+
+        橙色小圆数字 = 当前知识点剩余任务卡数量。8.x 常见一个知识点里
+        有多个 videoContainer；旧逻辑只处理第一张，导致反复重播同一个视频。
+        返回 None 表示没有可处理的视频/音频/文档卡，交回原分派逻辑。
+        """
+        items = course_mod.unfinished_task_cards(cards)
+        if not items:
+            return None
+        ratio = video_mod.detect_completion_ratio(page, default=None)
+        log = self.log
+        log.info(f"  发现 {len(items)} 个未完成任务卡（橙色数字={ch.hint}）→ 逐卡处理")
+        results = []
+        for idx, (_card, kind, iframe) in enumerate(items, 1):
+            if not self._should_handle("document" if kind == "document" else "video"):
+                continue
+            frame = self._frame_of_iframe(page, iframe)
+            if frame is None:
+                log.warning(f"   [{idx}/{len(items)}] {kind} 任务卡 iframe 未就绪 → 跳过")
+                results.append(("manual", "iframe 未就绪"))
+                continue
+            scope = _FrameScope(page, frame)
+            self.task_count += 1
+            self.humanizer.scroll(scope)
+            log.info(f"   [{idx}/{len(items)}] {kind} 任务卡 → 播放/阅读")
+            if kind in ("video", "audio"):
+                st, note = video_mod.play_video(
+                    self.session, self.cfg, log, scope, self.popup, None,
+                    completion_ratio=ratio, keepalive=self._ensure_session,
+                )
+            else:
+                st, note = document_mod.browse_document(
+                    self.session, self.cfg, log, scope, self.popup, None,
+                )
+            log.info(f"     → {st} | {str(note)[:80]}")
+            results.append((st, note))
+            hint_i = self._verify_chapter(ch, rounds=1)
+            if isinstance(hint_i, int) and hint_i == 0:
+                break
+        if not results:
+            return None
+        statuses = [s for s, _ in results]
+        status = "failed" if "failed" in statuses else ("done" if "done" in statuses else "manual")
+        detail = results[0][1]
+        note = f"逐卡处理 {len(results)}/{len(items)} 个任务点" + (f"；{detail}" if detail else "")
+        ctype = "document" if all(k == "document" for _, k, _ in items) else "video"
+        return status, note, ctype
+
     def process_chapter(self, ch):
         log = self.log
         self._last_chapter_note = ""
@@ -1484,8 +1570,12 @@ class Runner:
                                 if m:
                                     rate_used = float(m.group(1))
         elif cards is not None:
-            ctype = course_mod.card_type(cards)
-            status, note = self._handle_card(page, cards, ctype, ch)
+            multi = self._process_attachment_cards(ch, page, cards)
+            if multi is not None:
+                status, note, ctype = multi
+            else:
+                ctype = course_mod.card_type(cards)
+                status, note = self._handle_card(page, cards, ctype, ch)
             m = re.search(r"rate=([\d.]+)x", note or "")
             if m:
                 rate_used = float(m.group(1))

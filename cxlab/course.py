@@ -904,6 +904,44 @@ def chapter_element(page, cid):
     return None, None
 
 
+def unfinished_task_cards(cards_frame):
+    """列出章节内容帧里未完成的真实任务卡：[(card, kind, iframe), ...]。
+
+    橙色小圆里的数字就是这类卡片的数量，不一定是“一个视频”。
+    8.x 课程常见：同一知识点内 3 个 videoContainer，每个都是独立任务点。
+    """
+    out = []
+    try:
+        cards = cards_frame.query_selector_all(".ans-attach-ct")
+    except Exception:  # noqa: BLE001
+        return out
+    for card in cards:
+        try:
+            cls = (card.get_attribute("class") or "").lower()
+            if "ans-job-finished" in cls:
+                continue
+            if card.query_selector(".ans-job-icon") is None:
+                continue
+            iframe = card.query_selector("iframe")
+            src = (iframe.get_attribute("src") or "").lower() if iframe else ""
+            if "modules/video" in src or "ans-insertvideo" in src:
+                kind = "video"
+            elif "modules/audio" in src:
+                kind = "audio"
+            elif ("modules/pdf" in src or "modules/document" in src
+                  or "pdfjs" in src or "office" in src):
+                kind = "document"
+            elif "modules/work" in src:
+                kind = "quiz"
+            else:
+                kind = "unknown"
+            if kind in ("video", "audio", "document"):
+                out.append((card, kind, iframe))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 def card_type(cards_frame):
     """判断当前任务点卡片类型：video / document / quiz / unknown。"""
     subs = []

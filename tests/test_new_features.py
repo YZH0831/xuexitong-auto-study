@@ -669,4 +669,96 @@ assert qclick["n"] == 3, qclick
 assert seen15["qtype"] == "single" and len(seen15["options"]) == 2
 print("[15] 视频弹题 OK（答案回填、提交、继续；无模型时仍转人工）")
 
+# ---------------- 16) 橙色数字 = 章节内多个任务卡，必须逐个处理 ----------------
+class _FakeIframe:
+    def __init__(self, src):
+        self.src = src
+
+    def get_attribute(self, name):
+        return self.src
+
+
+class _FakeTaskCard:
+    def __init__(self, classes, src, has_job=True):
+        self.classes = classes
+        self.iframe = _FakeIframe(src) if src else None
+        self.has_job = has_job
+
+    def get_attribute(self, name):
+        return self.classes if name == "class" else ""
+
+    def query_selector(self, sel):
+        if sel == ".ans-job-icon":
+            return object() if self.has_job else None
+        if sel == "iframe":
+            return self.iframe
+        return None
+
+
+class _FakeCardsFrame:
+    def __init__(self, cards):
+        self.cards = cards
+
+    def query_selector_all(self, sel):
+        return self.cards
+
+
+cards16 = _FakeCardsFrame([
+    _FakeTaskCard("ans-attach-ct videoContainer ans-job-finished", "/ananas/modules/video/index.html"),
+    _FakeTaskCard("ans-attach-ct videoContainer", "/ananas/modules/video/index.html"),
+    _FakeTaskCard("ans-attach-ct videoContainer", "/ananas/modules/video/index.html"),
+    _FakeTaskCard("ans-attach-ct videoContainer", "/ananas/modules/video/index.html"),
+    _FakeTaskCard("ans-attach-ct", "/ananas/modules/pdf/index.html", has_job=False),
+])
+items16 = course_mod.unfinished_task_cards(cards16)
+assert len(items16) == 3 and [k for _, k, _ in items16] == ["video", "video", "video"]
+
+runner16 = Runner(Config(load_config(str(CFG_PATH))), log, argparse.Namespace(
+    select="", pick=False, list_courses=False, dry_run=True,
+    only="", headless=True, course="", config="config.yaml"))
+runner16.report = type("R", (), {"add": lambda self, *a, **k: None})()
+runner16.session = type("S", (), {"keep_alive": lambda self: None})()
+runner16.popup = type("P", (), {"tick": lambda self, page=None: None})()
+runner16.humanizer = type("H", (), {"scroll": lambda self, page=None: None,
+                                    "task_interval": lambda self, s=0: None})()
+runner16._should_handle = lambda kind: True
+runner16._frame_of_iframe = lambda page, iframe: object()
+verify16 = {"n": 0, "hints": [2, 1, 0]}
+
+
+def _verify16(ch, rounds=1):
+    hint = verify16["hints"][min(verify16["n"], len(verify16["hints"]) - 1)]
+    verify16["n"] += 1
+    return hint
+
+
+runner16._verify_chapter = _verify16
+_calls16 = []
+_orig_play16 = video_mod.play_video
+_orig_ratio16 = video_mod.detect_completion_ratio
+
+
+def _fake_play16(session, cfg, log, page, popup, tp, force_rate=None,
+                 keepalive=None, completion_ratio=None):
+    _calls16.append((page.frames[0], completion_ratio))
+    return "done", "fake task card"
+
+
+video_mod.play_video = _fake_play16
+video_mod.detect_completion_ratio = lambda page, default=None: 0.9
+_orig_unfinished16 = course_mod.unfinished_task_cards
+course_mod.unfinished_task_cards = lambda cards: [
+    (object(), "video", object()), (object(), "video", object()), (object(), "video", object())
+]
+try:
+    ch16 = course_mod.Chapter("multi", "橙色3", None, 3)
+    st16, note16, ct16 = runner16._process_attachment_cards(ch16, object(), object())
+finally:
+    video_mod.play_video = _orig_play16
+    video_mod.detect_completion_ratio = _orig_ratio16
+    course_mod.unfinished_task_cards = _orig_unfinished16
+assert st16 == "done" and ct16 == "video" and len(_calls16) == 3, (st16, note16, ct16, _calls16)
+assert all(r == 0.9 for _, r in _calls16)
+print("[16] 多任务卡 OK（橙色3 → 依次处理3个任务卡，不会重复播第一个）")
+
 print("\n[OK] 新增功能自测全部通过")

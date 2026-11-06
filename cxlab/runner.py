@@ -1516,10 +1516,15 @@ class Runner:
             page2, cards2 = self._open_chapter(ch)
             if cards2 is not None and course_mod.card_type(cards2) == "video":
                 self.task_count += 1
-                status2, note2 = video_mod.play_video(
-                    self.session, self.cfg, self.log, page2, self.popup, None,
-                    force_rate=1.0, keepalive=self._ensure_session,
-                )
+                # 直播回放必须先重新点 liveHref；直接在知识点页找 <video> 会失败。
+                live2 = self._handle_live(page2, ch, force_rate=1.0)
+                if live2 is not None:
+                    status2, note2 = live2
+                else:
+                    status2, note2 = video_mod.play_video(
+                        self.session, self.cfg, self.log, page2, self.popup, None,
+                        force_rate=1.0, keepalive=self._ensure_session,
+                    )
                 status, note = status2, f"{note}；1x 重播：{note2}"
                 hint = self._verify_chapter(ch)
 
@@ -1645,7 +1650,7 @@ class Runner:
                 continue
         return None
 
-    def _handle_live(self, page, ch):
+    def _handle_live(self, page, ch, force_rate=None):
         """点进直播卡片，进入 zhibo.chaoxing.com 回放页后按视频播放。"""
         log = self.log
         entry = self._find_live_entry(page)
@@ -1702,7 +1707,8 @@ class Runner:
             log.info(f"  直播页已打开: {live_page.url[:100]}")
             status, note = video_mod.play_video(
                 self.session, self.cfg, log, live_page, self.popup, None,
-                keepalive=self._ensure_session, completion_ratio=completion_hint,
+                force_rate=force_rate, keepalive=self._ensure_session,
+                completion_ratio=completion_hint,
             )
             return status, f"直播回放：{note}"
         finally:

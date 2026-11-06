@@ -290,7 +290,7 @@ quiz:
 
 只有命中任一绿色完成标识，或橙色数字为 0 且已按规则点进去点「下一节」后，才允许进入下一个任务。橙色数字非 0 时不会静默跳过。
 
-遇到门控失败、章节处理失败或橙色 0 找不到「下一节」时，会先唤起本机 WorkBuddy / TRAE 判断或维修；同一章节本轮只唤起一次。本地助手明确写回 `handled: true` 才重试当前章节；未找到助手、超时或明确 `handled: false` 才最终转人工。修复请求只写到本地 `output/local_repair/`，不包含 `config.yaml`、登录态、Cookie 或密钥，该目录也不会进入 Git。
+遇到门控失败、章节处理失败或橙色 0 找不到「下一节」时，会先唤起本机 WorkBuddy / TRAE 判断或维修；同一章节本轮只唤起一次。优先使用 WorkBuddy 自带 CLI 的无界面 `-p` 模式（Read/Edit/Write，最多 8 轮），找不到 CLI 时才尝试 GUI；本地助手明确写回 `handled: true` 才重试当前章节；未找到助手、超时或明确 `handled: false` 才最终转人工。修复请求只写到本地 `output/local_repair/`，不包含 `config.yaml`、登录态、Cookie 或密钥，该目录也不会进入 Git。
 
 ## 七、项目结构
 

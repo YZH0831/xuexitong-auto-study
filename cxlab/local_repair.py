@@ -14,7 +14,30 @@ import subprocess
 import time
 from pathlib import Path
 
-DEFAULT_TIMEOUT_S = 90
+DEFAULT_TIMEOUT_S = 180
+
+
+def _workbuddy_cli():
+    """返回 (node.exe, codebuddy CLI) —— 优先用 WorkBuddy 自带的无界面 CLI。"""
+    resources = Path(os.environ.get("WORKBUDDY_RESOURCES_PATH")
+                     or (Path.home() / "AppData/Local/Programs/WorkBuddy/resources"))
+    cli = resources / "app.asar.unpacked/cli/bin/codebuddy"
+    if not cli.is_file():
+        return None, None
+    node_candidates = []
+    env_node = os.environ.get("CODEBUDDY_NODE_BIN")
+    if env_node:
+        node_candidates.append(Path(env_node))
+    versions = Path.home() / ".workbuddy/binaries/node/versions"
+    if versions.is_dir():
+        node_candidates.extend(sorted(versions.glob("*/node.exe"), reverse=True))
+    for node in node_candidates:
+        try:
+            if node.is_file():
+                return node, cli
+        except OSError:
+            continue
+    return None, None
 
 
 def _safe_text(value, limit=600):
@@ -138,6 +161,7 @@ def request_repair(cfg, log, project_root, chapter, reason, note="", timeout_s=N
     )
 
     command = lr.get("command") or []
+    cli_mode = False
     if command and not isinstance(command, (list, tuple)):
         return False, "local_repair.command 必须是列表，例如 [\"python\", \"repair.py\"]"
     if command:
@@ -153,15 +177,38 @@ def request_repair(cfg, log, project_root, chapter, reason, note="", timeout_s=N
         parts = [render(part) for part in command]
         app_name = "配置的本地修复命令"
     else:
-        app_name, exe = _app_candidates(lr)
-        if exe is None:
-            return False, "未找到 WorkBuddy/TRAE 可执行文件，也未配置 local_repair.command"
-        parts = [str(exe), str(prompt_path)]
+        node, cli = _workbuddy_cli()
+        if node is not None:
+            prompt_text = prompt_path.read_text(encoding="utf-8")
+            parts = [
+                str(node), str(cli), "-p",
+                "--output-format", "json",
+                "--permission-mode", "acceptEdits",
+                "--tools", "Read,Edit,Write",
+                "-y", "--max-turns", "8", "--no-session-persistence",
+                prompt_text,
+            ]
+            app_name = "WorkBuddy CLI"
+            cli_mode = True
+        else:
+            app_name, exe = _app_candidates(lr)
+            if exe is None:
+                return False, "未找到 WorkBuddy/TRAE 可执行文件，也未配置 local_repair.command"
+            parts = [str(exe), str(prompt_path)]
 
     log.info(f"  问题保底：唤起 {app_name} 判断/维修…")
     proc = _launch(parts, root, out_dir, log)
     if proc is None:
         return False, "本地助手启动失败"
+
+    # CLI 模式如果提前退出且没写响应，说明模型/登录/权限失败，不必干等 3 分钟。
+    if cli_mode:
+        for _ in range(8):
+            if response_path.exists() or proc.poll() is not None:
+                break
+            time.sleep(0.5)
+        if proc.poll() is not None and not response_path.exists():
+            return False, f"WorkBuddy CLI 已退出（code={proc.returncode}）但未写回结果"
 
     raw_timeout = timeout_s if timeout_s is not None else lr.get("timeout_s", DEFAULT_TIMEOUT_S)
     try:

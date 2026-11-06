@@ -522,4 +522,47 @@ assert state12b == {"process": 1}, state12b
 assert [c.id for c in runner12b.failed_chapters] == ["manual-final"]
 print("[12] 本地助手保底调度 OK（修好→重试当前章节；失败→停止并转人工）")
 
+# ---------------- 13) 直播 1x 重播必须重新点 liveHref，并透传 force_rate ----------------
+class _LivePage:
+    url = "https://zhibo.chaoxing.com/fake"
+
+    def wait_for_timeout(self, ms):
+        return None
+
+    def bring_to_front(self):
+        return None
+
+
+runner13 = Runner(Config(load_config(str(CFG_PATH))), log, argparse.Namespace(
+    select="", pick=False, list_courses=False, dry_run=True,
+    only="", headless=True, course="", config="config.yaml"))
+runner13.session = type("S", (), {
+    "click_capture": lambda self, page, el, wait_s=0: (_LivePage(), True),
+    "close_page": lambda self, page: None,
+})()
+runner13.popup = type("P", (), {"tick": lambda self, page=None: None})()
+runner13._find_live_entry = lambda page: (object(), object())
+runner13._ensure_session = lambda context="": True
+_seen13 = {}
+_orig_detect13 = video_mod.detect_completion_ratio
+_orig_play13 = video_mod.play_video
+video_mod.detect_completion_ratio = lambda page, default=None: 0.9
+
+
+def _fake_play13(session, cfg, log, page, popup, tp, force_rate=None,
+                 keepalive=None, completion_ratio=None):
+    _seen13.update(force_rate=force_rate, completion=completion_ratio)
+    return "done", "fake live play"
+
+
+video_mod.play_video = _fake_play13
+try:
+    status13, note13 = runner13._handle_live(_LivePage(), course_mod.Chapter("live", "直播", None, 1),
+                                             force_rate=1.0)
+finally:
+    video_mod.detect_completion_ratio = _orig_detect13
+    video_mod.play_video = _orig_play13
+assert status13 == "done" and _seen13 == {"force_rate": 1.0, "completion": 0.9}, _seen13
+print("[13] 直播 1x 重播 OK（重新点 liveHref，force_rate/completion 正确透传）")
+
 print("\n[OK] 新增功能自测全部通过")

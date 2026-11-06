@@ -136,7 +136,7 @@ DEFAULTS = {
         # 出问题先唤起本机 WorkBuddy / TRAE 判断或维修，失败才转人工。
         "local_repair": {
             "enabled": True,
-            "timeout_s": 90,
+            "timeout_s": 180,
             "workbuddy_exe": "",
             "trae_exe": "",
             # 可选命令模板，占位符 {request} / {response} / {prompt} 会被替换为实际路径。

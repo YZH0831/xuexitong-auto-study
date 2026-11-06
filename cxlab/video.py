@@ -60,6 +60,9 @@ COMPLETION_RULE = re.compile(
     r"|(?:达到|需|满|≥|大于等于)[^。；\n]{0,12}?(\d{1,3})\s*%[^。；\n]{0,20}?(?:完成|任务点)"
 )
 PLAYER_URL_HINTS = ("modules/video", "modules/audio", "modules/live")
+# 超星视频播放器内的批注 / 互动题（选择器取自开源项目 uXueScript 的实测结构）
+VIDEO_ANNOTATION_CONTINUE = ".ans-videoannotation .continueLearn"
+VIDEO_QUIZ_ROOT = ".ans-videoquiz"
 # 从高到低探测；播放器拒绝时自动降到下一档。
 SPEED_CANDIDATES = (3.0, 2.5, 2.0, 1.75, 1.5, 1.25)
 
@@ -282,6 +285,39 @@ def _kick(el, rate, frame, log):
         pass
 
 
+def tick_video_overlays(page, log):
+    """处理视频播放期间的批注/互动题。
+
+    返回：
+      continue — 已点击批注的“继续学习”
+      quiz     — 检测到视频互动题（当前不盲目作答，交给本地助手/人工）
+      ""       — 无覆盖层
+    """
+    frames = []
+    try:
+        frames = list(page.frames)
+    except Exception:  # noqa: BLE001
+        frames = [page]
+    for frame in frames:
+        try:
+            btn = frame.query_selector(VIDEO_ANNOTATION_CONTINUE)
+            if btn is not None and btn.is_visible():
+                btn.click(timeout=2500)
+                log.info("  视频批注已点击「继续学习」")
+                return "continue"
+        except Exception:  # noqa: BLE001
+            continue
+    for frame in frames:
+        try:
+            quiz = frame.query_selector(VIDEO_QUIZ_ROOT)
+            if quiz is not None and quiz.is_visible():
+                log.warning("  检测到视频弹题 → 不盲目点选，交给本地助手/人工")
+                return "quiz"
+        except Exception:  # noqa: BLE001
+            continue
+    return ""
+
+
 def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=None,
                completion_ratio=None):
     """播放当前页视频，返回 (status, note)。
@@ -338,6 +374,7 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
     paused_cnt = 0
     hidden_ticks = 0
     last_alive = 0.0
+    last_overlay_check = 0.0
     # 每 45 秒动一次鼠标：鼠标长时间静止时平台可能判为挂机、不计观看时长
     # （实测纯视频章节全部复核失败，而带测验的章节因做题时鼠标在动反而成功）
     alive_every = 45.0
@@ -363,6 +400,14 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
             if frame2 is not None:
                 frame = frame2
             continue
+
+        if elapsed - last_overlay_check >= 4:
+            last_overlay_check = elapsed
+            overlay = tick_video_overlays(page, log)
+            if overlay == "continue":
+                _kick(el, rate, frame, log)
+            elif overlay == "quiz":
+                return "manual", "视频弹题出现，需本地助手/人工作答"
 
         # 平台规则：观看时「不可离开或将页面最小化」；后台运行可能导致不计时
         try:

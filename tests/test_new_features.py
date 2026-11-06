@@ -565,4 +565,45 @@ finally:
 assert status13 == "done" and _seen13 == {"force_rate": 1.0, "completion": 0.9}, _seen13
 print("[13] 直播 1x 重播 OK（重新点 liveHref，force_rate/completion 正确透传）")
 
+# ---------------- 14) 视频批注/弹题覆盖层 ----------------
+class _OverlayEl:
+    def __init__(self, click_counter=None):
+        self.click_counter = click_counter
+
+    def is_visible(self):
+        return True
+
+    def click(self, timeout=None):
+        if self.click_counter is not None:
+            self.click_counter["n"] += 1
+
+
+class _OverlayFrame:
+    def __init__(self, annotation=False, quiz=False, counter=None):
+        self.annotation = annotation
+        self.quiz = quiz
+        self.counter = counter
+
+    def query_selector(self, sel):
+        if sel == video_mod.VIDEO_ANNOTATION_CONTINUE and self.annotation:
+            return _OverlayEl(self.counter)
+        if sel == video_mod.VIDEO_QUIZ_ROOT and self.quiz:
+            return _OverlayEl()
+        return None
+
+
+class _OverlayPage:
+    def __init__(self, *frames):
+        self.frames = list(frames)
+
+
+clicks14 = {"n": 0}
+assert video_mod.tick_video_overlays(
+    _OverlayPage(_OverlayFrame(annotation=True, counter=clicks14)), log) == "continue"
+assert clicks14["n"] == 1
+assert video_mod.tick_video_overlays(
+    _OverlayPage(_OverlayFrame(quiz=True)), log) == "quiz"
+assert video_mod.tick_video_overlays(_OverlayPage(_OverlayFrame()), log) == ""
+print("[14] 视频覆盖层 OK（批注自动继续；弹题不盲选，转本地助手/人工）")
+
 print("\n[OK] 新增功能自测全部通过")

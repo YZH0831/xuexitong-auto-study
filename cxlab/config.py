@@ -62,6 +62,7 @@ DEFAULTS = {
         # 完成后按页面完成线（常见 90%）停止，不再一律播到 100%。
         "speed": 3.0,
         "duration_required_1x": True,
+        "answer_popup_quiz": True,   # 视频弹题：大模型可用时自动作答；否则转本地助手/人工
         "timeout_per_video_min": 120,
         "poll_interval_s": 3,
     },

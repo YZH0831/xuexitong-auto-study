@@ -606,4 +606,67 @@ assert video_mod.tick_video_overlays(
 assert video_mod.tick_video_overlays(_OverlayPage(_OverlayFrame()), log) == ""
 print("[14] 视频覆盖层 OK（批注自动继续；弹题不盲选，转本地助手/人工）")
 
+# ---------------- 15) 视频弹题：大模型答案回填 + 提交/继续 ----------------
+class _QuizEl:
+    def __init__(self, text="", children=None, counter=None):
+        self.text = text
+        self.children = children or {}
+        self.counter = counter
+
+    def inner_text(self):
+        return self.text
+
+    def is_visible(self):
+        return True
+
+    def query_selector(self, sel):
+        value = self.children.get(sel)
+        if isinstance(value, list):
+            return value[0] if value else None
+        return value
+
+    def query_selector_all(self, sel):
+        value = self.children.get(sel, [])
+        return value if isinstance(value, list) else [value]
+
+    def get_attribute(self, name):
+        return ""
+
+    def click(self, timeout=None):
+        if self.counter is not None:
+            self.counter["n"] += 1
+
+
+class _QuizFrame:
+    def wait_for_timeout(self, ms):
+        return None
+
+
+qclick = {"n": 0}
+label_a = _QuizEl(counter=qclick)
+label_b = _QuizEl(counter=qclick)
+submit = _QuizEl(counter=qclick)
+cont = _QuizEl(counter=qclick)
+title = _QuizEl("视频弹题测试")
+opt_a = _QuizEl("A. 选项一", {"label": label_a})
+opt_b = _QuizEl("B. 选项二", {"label": label_b})
+item = _QuizEl(children={video_mod.VIDEO_QUIZ_TITLE: title,
+                         video_mod.VIDEO_QUIZ_OPTION: [opt_a, opt_b]})
+root = _QuizEl(children={video_mod.VIDEO_QUIZ_ITEM: [item],
+                         video_mod.VIDEO_QUIZ_SUBMIT: submit,
+                         video_mod.VIDEO_QUIZ_CONTINUE: cont})
+seen15 = {}
+
+
+def _solver15(stem, options, qtype):
+    seen15.update(stem=stem, options=options, qtype=qtype)
+    return "A", 0.9, "test"
+
+
+ok15, detail15 = video_mod.solve_video_quiz(_QuizFrame(), log, _solver15, root)
+assert ok15, detail15
+assert qclick["n"] == 3, qclick
+assert seen15["qtype"] == "single" and len(seen15["options"]) == 2
+print("[15] 视频弹题 OK（答案回填、提交、继续；无模型时仍转人工）")
+
 print("\n[OK] 新增功能自测全部通过")

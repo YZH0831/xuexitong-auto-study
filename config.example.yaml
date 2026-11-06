@@ -54,6 +54,7 @@ video:
   speed: 3.0                    # 默认从 3x 开始探测，选播放器实际支持的最高档；
                                 # 平台明确“禁止倍速”时仍强制 1x
   duration_required_1x: true    # 有“禁止倍速/累计观看 N 分钟”要求时强制真实 1 倍速
+  answer_popup_quiz: true       # 视频弹题：大模型可用时自动作答；否则转本地助手/人工
   timeout_per_video_min: 120    # 单个视频最长等待(分钟)
   poll_interval_s: 3            # 播放状态轮询间隔(秒)
 

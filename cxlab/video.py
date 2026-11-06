@@ -63,6 +63,11 @@ PLAYER_URL_HINTS = ("modules/video", "modules/audio", "modules/live")
 # 超星视频播放器内的批注 / 互动题（选择器取自开源项目 uXueScript 的实测结构）
 VIDEO_ANNOTATION_CONTINUE = ".ans-videoannotation .continueLearn"
 VIDEO_QUIZ_ROOT = ".ans-videoquiz"
+VIDEO_QUIZ_ITEM = ".tkItem"
+VIDEO_QUIZ_TITLE = ".tkItem_title"
+VIDEO_QUIZ_OPTION = ".ans-videoquiz-opt"
+VIDEO_QUIZ_SUBMIT = "#videoquiz-submit"
+VIDEO_QUIZ_CONTINUE = "#videoquiz-continue"
 # 从高到低探测；播放器拒绝时自动降到下一档。
 SPEED_CANDIDATES = (3.0, 2.5, 2.0, 1.75, 1.5, 1.25)
 
@@ -285,13 +290,92 @@ def _kick(el, rate, frame, log):
         pass
 
 
-def tick_video_overlays(page, log):
+def _text_of(el):
+    try:
+        return (el.inner_text() or "").strip().replace("\n", " ")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def solve_video_quiz(frame, log, solver, quiz_root=None):
+    """尝试用外部答题器完成当前视频弹题，返回 (是否已提交, 说明)。
+
+    结构参考超星播放器：.ans-videoquiz / .tkItem / .ans-videoquiz-opt /
+    #videoquiz-submit / #videoquiz-continue。
+    """
+    try:
+        root = quiz_root or frame.query_selector(VIDEO_QUIZ_ROOT)
+        if root is None or not root.is_visible():
+            return False, "未找到视频弹题容器"
+        items = root.query_selector_all(VIDEO_QUIZ_ITEM) or []
+        if not items:
+            return False, "视频弹题没有题目项"
+        for item in items:
+            title = _text_of(item.query_selector(VIDEO_QUIZ_TITLE)) or _text_of(item)
+            options = item.query_selector_all(VIDEO_QUIZ_OPTION) or []
+            if not title or len(options) < 2:
+                return False, "视频弹题题干/选项不完整"
+            texts = [_text_of(o) for o in options]
+            inputs = []
+            for opt in options:
+                try:
+                    inp = opt.query_selector("input")
+                    inputs.append((inp.get_attribute("type") or "").lower() if inp else "")
+                except Exception:  # noqa: BLE001
+                    inputs.append("")
+            is_multi = any(t == "checkbox" for t in inputs)
+            qtype = "multi" if is_multi else "single"
+            if len(options) == 2 and any(t in ("对", "正确", "√") for t in texts):
+                qtype = "judge"
+            answer, _conf, _reason = solver(
+                title, [{"letter": chr(65 + i), "text": t} for i, t in enumerate(texts)], qtype,
+            )
+            if not answer:
+                return False, f"视频弹题未得到答案：{title[:30]}"
+            letters = set(re.findall(r"[A-Z]", str(answer).upper()))
+            if not letters:
+                if str(answer).strip() in ("对", "正确", "√"):
+                    letters = {"A"}
+                elif str(answer).strip() in ("错", "不正确", "×"):
+                    letters = {"B"}
+            clicked = 0
+            for i, opt in enumerate(options):
+                if chr(65 + i) not in letters:
+                    continue
+                try:
+                    label = opt.query_selector("label") or opt
+                    label.click(timeout=2500)
+                    clicked += 1
+                except Exception:  # noqa: BLE001
+                    continue
+            if not clicked:
+                return False, f"视频弹题答案无法落到选项：{answer}"
+        submit = root.query_selector(VIDEO_QUIZ_SUBMIT) or frame.query_selector(VIDEO_QUIZ_SUBMIT)
+        if submit is not None and submit.is_visible():
+            submit.click(timeout=3000)
+            frame.wait_for_timeout(800)
+        cont = None
+        for _ in range(4):
+            cont = root.query_selector(VIDEO_QUIZ_CONTINUE) or frame.query_selector(VIDEO_QUIZ_CONTINUE)
+            if cont is not None and cont.is_visible():
+                cont.click(timeout=3000)
+                break
+            frame.wait_for_timeout(500)
+        log.info("  视频弹题已自动作答并提交")
+        return True, "视频弹题已自动作答"
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"  视频弹题自动作答失败: {str(exc)[:100]}")
+        return False, "视频弹题自动作答异常"
+
+
+def tick_video_overlays(page, log, quiz_solver=None):
     """处理视频播放期间的批注/互动题。
 
     返回：
-      continue — 已点击批注的“继续学习”
-      quiz     — 检测到视频互动题（当前不盲目作答，交给本地助手/人工）
-      ""       — 无覆盖层
+      continue    — 已点击批注的“继续学习”
+      quiz_solved — 弹题已自动作答
+      quiz        — 检测到视频互动题但无法作答（交给本地助手/人工）
+      ""          — 无覆盖层
     """
     frames = []
     try:
@@ -311,7 +395,13 @@ def tick_video_overlays(page, log):
         try:
             quiz = frame.query_selector(VIDEO_QUIZ_ROOT)
             if quiz is not None and quiz.is_visible():
-                log.warning("  检测到视频弹题 → 不盲目点选，交给本地助手/人工")
+                if quiz_solver is not None:
+                    ok, detail = solve_video_quiz(frame, log, quiz_solver, quiz)
+                    if ok:
+                        return "quiz_solved"
+                    log.warning(f"  {detail} → 转本地助手/人工")
+                else:
+                    log.warning("  检测到视频弹题（未配置大模型）→ 转本地助手/人工")
                 return "quiz"
         except Exception:  # noqa: BLE001
             continue
@@ -363,6 +453,21 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
         log.info(f"  平台要求累计观看 {rule_min} 分钟")
     log.info(f"  完成线: 观看 {completion:.0%} 即视为完成")
 
+    # 视频弹题自动作答（只在配置了可用大模型时启用；否则转本地助手/人工）。
+    quiz_solver = None
+    if bool(vcfg.get("answer_popup_quiz", True)):
+        try:
+            from .llm_answer import LLMAnswer
+            _llm = LLMAnswer(cfg, log)
+            _ok, _why = _llm.available()
+            if _ok:
+                quiz_solver = _llm.solve
+                log.info("  视频弹题自动作答：已启用（大模型）")
+            else:
+                log.debug(f"  视频弹题自动作答未启用：{_why}")
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"  视频弹题自动作答初始化失败: {str(exc)[:80]}")
+
     _kick(el, rate, frame, log)
 
     limit_s = float(vcfg.timeout_per_video_min) * 60
@@ -403,8 +508,10 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
 
         if elapsed - last_overlay_check >= 4:
             last_overlay_check = elapsed
-            overlay = tick_video_overlays(page, log)
+            overlay = tick_video_overlays(page, log, quiz_solver=quiz_solver)
             if overlay == "continue":
+                _kick(el, rate, frame, log)
+            elif overlay == "quiz_solved":
                 _kick(el, rate, frame, log)
             elif overlay == "quiz":
                 return "manual", "视频弹题出现，需本地助手/人工作答"

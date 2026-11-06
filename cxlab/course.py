@@ -492,6 +492,17 @@ TYPE_HINTS = [
     ("live", ["直播", "live", "见面课"]),
 ]
 
+# 两类完成标识：绿色勾 / 绿色小圆
+GREEN_MARKER_RE = re.compile(
+    r"icon_yiwanc|icon_completed|icon_check|checkmark|green|yiwanc|wancheng|(?<!in)complete|finish|done",
+    re.I,
+)
+
+
+def is_green_marker(classes="", text=""):
+    """根据类名或文字判断是否是章节树的绿色完成标识。"""
+    return bool(GREEN_MARKER_RE.search(str(classes or ""))) or "已完成" in str(text or "")
+
 ID_PATTERNS = {
     "course_id": ["courseId", "courseid", "moocId"],
     "clazzid": ["clazzid", "classId"],
@@ -977,18 +988,36 @@ JS_CHAPTERS = r"""
     if (!task) return null;
     const cls = (task.className || '').toString().toLowerCase();
     const txt = (task.innerText || '').trim();
-    const green = task.matches('.icon_yiwanc, .icon_Completed')
-      || /icon_yiwanc|icon_completed/.test(cls)
-      || txt.includes('已完成');
     const badge = task.querySelector('.catalog_points_yi, .orangeNew, .jobUnfinishCount');
     let n = null;
     if (badge) {
       const raw = (badge.tagName === 'INPUT' ? badge.value : badge.innerText || '').trim();
       if (/^\d+$/.test(raw)) n = parseInt(raw, 10);
     }
-    if (green) return {state: 'green', hint: 0};
+    const isGreenColor = (el) => {
+      if (!el) return false;
+      const cs = getComputedStyle(el);
+      const vals = [cs.color, cs.backgroundColor, cs.borderTopColor, cs.borderColor];
+      for (const raw of vals) {
+        const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(raw || '');
+        if (!m) continue;
+        const r = +m[1], g = +m[2], b = +m[3];
+        if (g > 90 && g > r * 1.15 && g > b * 1.15) return true;
+      }
+      return false;
+    };
+    // 完成态一：绿色勾（icon_yiwanc / icon_Completed / 已完成）
+    const greenCheck = task.matches('.icon_yiwanc, .icon_Completed')
+      || /icon_yiwanc|icon_completed|icon_check|checkmark|gou/.test(cls)
+      || txt.includes('已完成');
+    // 完成态二：橙色小圆变绿（类名或计算样式呈绿色）
+    const greenCircle = /green|yiwanc|wancheng|(?<!in)complete|finish|done/.test(cls)
+      || isGreenColor(task) || isGreenColor(badge);
+    if (greenCheck || greenCircle) {
+      return {state: 'green', hint: 0, marker: greenCheck ? 'check' : 'circle'};
+    }
     if (/catalog_jindu/.test(cls) || badge || /orangeNew|catalog_points_yi/.test(task.outerHTML || '')) {
-      if (n !== null) return {state: 'orange', hint: n};
+      if (n !== null) return {state: 'orange', hint: n, marker: 'number'};
     }
     return null;
   };
@@ -1011,7 +1040,8 @@ JS_CHAPTERS = r"""
       id: cid,
       title: raw.replace(/\s+/g, ' ').trim().slice(0, 60),
       hint: state ? state.hint : null,
-      state: state ? state.state : null
+      state: state ? state.state : null,
+      marker: state ? (state.marker || null) : null
     });
   });
   if (out.length) return out;
@@ -1031,7 +1061,8 @@ JS_CHAPTERS = r"""
       id: cid,
       title: raw.replace(/\s+/g, ' ').trim().slice(0, 60),
       hint: state ? state.hint : null,
-      state: state ? state.state : null
+      state: state ? state.state : null,
+      marker: state ? (state.marker || null) : null
     });
   });
   return out;
@@ -1049,18 +1080,36 @@ JS_ONE_CHAPTER = r"""
     if (!task) return null;
     const cls = (task.className || '').toString().toLowerCase();
     const txt = (task.innerText || '').trim();
-    const green = task.matches('.icon_yiwanc, .icon_Completed')
-      || /icon_yiwanc|icon_completed/.test(cls)
-      || txt.includes('已完成');
     const badge = task.querySelector('.catalog_points_yi, .orangeNew, .jobUnfinishCount');
     let n = null;
     if (badge) {
       const raw = (badge.tagName === 'INPUT' ? badge.value : badge.innerText || '').trim();
       if (/^\d+$/.test(raw)) n = parseInt(raw, 10);
     }
-    if (green) return {state: 'green', hint: 0};
+    const isGreenColor = (el) => {
+      if (!el) return false;
+      const cs = getComputedStyle(el);
+      const vals = [cs.color, cs.backgroundColor, cs.borderTopColor, cs.borderColor];
+      for (const raw of vals) {
+        const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(raw || '');
+        if (!m) continue;
+        const r = +m[1], g = +m[2], b = +m[3];
+        if (g > 90 && g > r * 1.15 && g > b * 1.15) return true;
+      }
+      return false;
+    };
+    // 完成态一：绿色勾（icon_yiwanc / icon_Completed / 已完成）
+    const greenCheck = task.matches('.icon_yiwanc, .icon_Completed')
+      || /icon_yiwanc|icon_completed|icon_check|checkmark|gou/.test(cls)
+      || txt.includes('已完成');
+    // 完成态二：橙色小圆变绿（类名或计算样式呈绿色）
+    const greenCircle = /green|yiwanc|wancheng|(?<!in)complete|finish|done/.test(cls)
+      || isGreenColor(task) || isGreenColor(badge);
+    if (greenCheck || greenCircle) {
+      return {state: 'green', hint: 0, marker: greenCheck ? 'check' : 'circle'};
+    }
     if (/catalog_jindu/.test(cls) || badge || /orangeNew|catalog_points_yi/.test(task.outerHTML || '')) {
-      if (n !== null) return {state: 'orange', hint: n};
+      if (n !== null) return {state: 'orange', hint: n, marker: 'number'};
     }
     return null;
   };
@@ -1139,7 +1188,9 @@ def _js_chapters(frame):
             cid = str(item.get("id") or "")
             if not cid:
                 continue
-            chapters.append(Chapter(cid, item.get("title") or f"知识点{cid}", None, item.get("hint")))
+            ch = Chapter(cid, item.get("title") or f"知识点{cid}", None, item.get("hint"))
+            ch.marker = item.get("marker")
+            chapters.append(ch)
         except Exception:  # noqa: BLE001
             continue
     return chapters
@@ -1153,8 +1204,26 @@ def _hint_from_item(el):
             return None
         cls = (task.get_attribute("class") or "").lower()
         inner = (task.inner_text() or "").strip()
-        if "icon_yiwanc" in cls or "icon_completed" in cls or "已完成" in inner:
+        if is_green_marker(cls, inner):
             return 0
+        # 绿色小圆未必带类名，补一次计算样式判断。
+        try:
+            if task.evaluate("""e => {
+              const els = [e, e.querySelector('.catalog_points_yi, .orangeNew, .jobUnfinishCount')].filter(Boolean);
+              for (const el of els) {
+                const cs = getComputedStyle(el);
+                for (const raw of [cs.color, cs.backgroundColor, cs.borderTopColor, cs.borderColor]) {
+                  const m = /rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/.exec(raw || '');
+                  if (!m) continue;
+                  const r = +m[1], g = +m[2], b = +m[3];
+                  if (g > 90 && g > r * 1.15 && g > b * 1.15) return true;
+                }
+              }
+              return false;
+            }"""):
+                return 0
+        except Exception:  # noqa: BLE001
+            pass
         badge = task.query_selector(".catalog_points_yi, .orangeNew, .jobUnfinishCount")
         raw = ""
         if badge is not None:

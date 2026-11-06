@@ -2,10 +2,12 @@
 """主流程编排：登录 -> 定位课程 -> 逐章节推进 -> 任务点处理 -> 作业 -> 输出报告。"""
 import re
 import time
+from pathlib import Path
 
 from . import course as course_mod
 from . import document as document_mod
 from . import homework as homework_mod
+from . import local_repair as local_repair_mod
 from . import login as login_mod
 from . import quiz as quiz_mod
 from . import video as video_mod
@@ -24,6 +26,8 @@ TYPE_LABEL = {
     "live": "直播",
     "unknown": "未知",
 }
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class Runner:
@@ -51,6 +55,8 @@ class Runner:
         self.failed_chapters = []    # 失败重试队列（本章节对象）
         self._chapters_cache = []
         self._submit_blocked_ids = set()  # 提交被平台拦截的章节：本 run 不再自动重提
+        self._local_repair_attempted = set()  # 本 run 已唤起过本地助手的章节
+        self._last_chapter_note = ""
         # 会话健康 / 掉线自愈
         self._last_probe = 0.0
         self._relogin_times = []
@@ -529,7 +535,7 @@ class Runner:
         else:
             log.info("平台状态：接口不可用，改用章节树标记判定")
 
-        # 小圆是调度权威：绿色=完成，橙色 N=待完成，橙色 0=直接跳过。
+        # 小圆是调度权威：绿色=完成，橙色 N=待完成，橙色 0=点进去下滑点「下一节」推进。
         circle = course_mod.discover_chapters(page, log, force=True)
         if circle:
             cmap = {c.id: c.hint for c in circle}
@@ -568,6 +574,26 @@ class Runner:
 
         self._run_rounds(chapters)
 
+    def _try_local_repair(self, ch, reason, note=""):
+        """先唤起本机 WorkBuddy / TRAE 判断或维修；同一章节本 run 只试一次。"""
+        lr = (self.cfg.safety.get("local_repair") or {}) if hasattr(self.cfg, "safety") else {}
+        if not bool(lr.get("enabled", True)):
+            return False
+        key = str(ch.id)
+        if key in self._local_repair_attempted:
+            return False
+        self._local_repair_attempted.add(key)
+        handled, detail = local_repair_mod.request_repair(
+            lr, self.log, ROOT, ch, reason, note or self._last_chapter_note,
+        )
+        if handled:
+            self.log.info(f"  本地助手已处理：{detail} → 重试当前章节")
+            self.report.add(ch.title, "本地助手保底", "done", detail)
+            return True
+        self.log.warning(f"  本地助手未能处理：{detail} → 最后转人工")
+        self.report.add(ch.title, "本地助手保底", "manual", f"未能处理：{detail}")
+        return False
+
     def _run_rounds(self, chapters):
         """带重试的章节处理循环：未完成的知识点在本轮末尾重试（可单元测试）。"""
         log, cfg = self.log, self.cfg
@@ -603,17 +629,31 @@ class Runner:
                     self.report.add(ch.title, "章节", "skipped", "已完成（树上绿色标记 / 接口 finish=total）")
                     log.info("  已完成，跳过")
                     continue
-                if ch.hint == -1 and bool(cfg.course.get("skip_no_task_nodes", True)):
-                    self.report.add(ch.title, "章节", "skipped", "无任务点（纯图文/未布置任务），无需学习")
-                    log.info("  无任务点，跳过")
+                if ch.hint == -1:
+                    log.info("  橙色 0 → 按规则点进去，下滑找到「下一节」并点击")
+                    status = self._advance_orange_zero(ch)
+                    self.humanizer.task_interval(int(cfg.safety.min_task_interval_s))
+                    if status == "manual":
+                        if self._try_local_repair(ch, "橙色0章节未点到下一节", "下滑后未找到或未点到「下一节」"):
+                            status = self._advance_orange_zero(ch)
+                        if status == "manual":
+                            self.report.add(ch.title, "橙色0推进", "manual", "未找到/未点到「下一节」")
+                            aborted = True
+                            break
+                    ch.hint = -1
                     continue
                 # 拟人化：进入章节前随机滚动页面
                 self.humanizer.scroll(self.session.page)
                 status = self.process_chapter(ch)
                 # 章节之间的最小间隔（带随机抖动）
                 self.humanizer.task_interval(int(cfg.safety.min_task_interval_s))
+                # manual/failed 先交给本机 WorkBuddy / TRAE 判断或维修，再重试一次。
+                if status in ("manual", "failed"):
+                    if self._try_local_repair(ch, "章节处理返回需人工/失败", self._last_chapter_note):
+                        status = self.process_chapter(ch)
+                        self.humanizer.task_interval(int(cfg.safety.min_task_interval_s))
 
-                # 用户指令门控：小圆绿色才允许下一个；橙色 0 才可跳过。
+                # 用户指令门控：小圆绿色才允许下一个；橙色 0 走专用「点进去→下滑→下一节」分支。
                 # 例外：本次打开仍识别为“敬请期待/即将上线”的占位章节，可先跳过；
                 # --only 是用户显式只处理某一类任务，也不按整课门控。
                 placeholder_skip = bool(status == "skipped" and getattr(self, "_placeholder_skip", False))
@@ -622,12 +662,23 @@ class Runner:
                 elif not getattr(self.args, "only", "") and ch.hint not in (0, -1):
                     state = ("橙色 0" if ch.hint == -1
                              else (f"橙色 {ch.hint}" if ch.hint else "状态未知"))
+                    # 门控失败同样先唤起本地助手；修好后重新读小圆，不许带病进入下一章。
+                    if self._try_local_repair(ch, "小圆门控未通过", f"当前状态：{state}"):
+                        fixed = self._verify_chapter(ch, rounds=1)
+                        if isinstance(fixed, int):
+                            ch.hint = fixed
+                        repaired = ch.hint == 0
+                        if ch.hint == -1:
+                            repaired = self._advance_orange_zero(ch) == "done"
+                        if repaired:
+                            log.info("  本地助手处理后已满足通行条件 → 继续")
+                            continue
                     log.error(
                         f"  小圆门控未通过（当前 {state}）→ 不进入下一个任务；"
-                        "请人工查看该知识点或等平台登记后重跑"
+                        "本地助手也未能处理，最后转人工"
                     )
                     self.report.add(ch.title, "小圆门控", "manual",
-                                    f"小圆未变绿且不是橙色 0（当前 {state}），已停止后续章节")
+                                    f"小圆未变绿且不是橙色 0（当前 {state}），本地助手未处理，已停止后续章节")
                     if ch.title not in self.failed_this_run:
                         self.failed_this_run.append(ch.title)
                     if all(c.id != ch.id for c in self.failed_chapters):
@@ -907,7 +958,7 @@ class Runner:
                 return str(t).strip()
         return ""
 
-    def _advance_candidates(self, page):
+    def _advance_candidates(self, page, marks=None):
         """收集各帧里所有可见的推进入口（下一节/继续/提交/图标箭头），按相似度排序。
 
         旧版只取文档序第一个命中，既容易漏（过滤过严）也容易抓错（推荐位里的
@@ -916,7 +967,7 @@ class Runner:
         out = []
         for f in course_mod.all_frames(page):
             try:
-                arr = f.evaluate_handle(self.JS_ADVANCE_CANDIDATES, self.ADVANCE_MARKS)
+                arr = f.evaluate_handle(self.JS_ADVANCE_CANDIDATES, list(marks or self.ADVANCE_MARKS))
                 count = int(arr.evaluate("a => a.length") or 0)
             except Exception:  # noqa: BLE001
                 continue
@@ -946,7 +997,47 @@ class Runner:
                 parts.append(str(sig))
         return " ;; ".join(parts)
 
-    def _click_next_block(self, page):
+    def _scroll_to_bottom_for_next(self, page):
+        """橙色0章节：把当前页和常见滚动容器都拉到底，方便露出「下一节」。"""
+        for _ in range(4):
+            try:
+                page.mouse.wheel(0, 1800)
+            except Exception:  # noqa: BLE001
+                pass
+            page.wait_for_timeout(350)
+        for f in course_mod.all_frames(page):
+            try:
+                f.evaluate(
+                    "() => { try { window.scrollTo(0, document.documentElement.scrollHeight"
+                    " || document.body.scrollHeight); } catch (e) {}"
+                    " document.querySelectorAll('[class*=\"content\"], [class*=\"scroll\"],"
+                    " [class*=\"main\"], iframe').forEach(e => {"
+                    " try { e.scrollTop = e.scrollHeight; } catch (_) {} }); return true; }"
+                )
+            except Exception:  # noqa: BLE001
+                continue
+        self.popup.tick(page)
+
+    def _advance_orange_zero(self, ch):
+        """橙色小圆数字为 0：点进去、下滑、直接点「下一节」推进。"""
+        log = self.log
+        page, _ = self._open_chapter(ch)
+        if getattr(self, "_last_locked", False):
+            log.warning("  橙色0章节未开放 → 无法点「下一节」")
+            ch.hint = 1
+            return "manual"
+        self._scroll_to_bottom_for_next(page)
+        if not self._click_next_block(page, marks=("下一节", "下一章")):
+            log.warning("  橙色0章节下滑后仍未点到「下一节」→ 停止，不继续后续章节")
+            ch.hint = 1
+            return "manual"
+        page.wait_for_timeout(1200)
+        self.popup.tick(page)
+        self.report.add(ch.title, "橙色0推进", "done", "已点进去、下滑并点击「下一节」")
+        log.info("  橙色0章节已按规则点「下一节」推进")
+        return "done"
+
+    def _click_next_block(self, page, marks=None):
         """点「下一节」等推进入口；只有页面确认发生变化才返回 True。
 
         三层保险：
@@ -954,7 +1045,7 @@ class Runner:
         2) 常规点击失败（被遮挡/超时）→ JS 合成点击兜底，事件冒泡触发委托 handler；
         3) 点完用页面指纹验证效果；没变化就换下一个候选，不再"点一次就算成功"。
         """
-        cands = self._advance_candidates(page)
+        cands = self._advance_candidates(page, marks)
         if not cands:
             return False
         state0 = self._page_state(page)
@@ -1204,10 +1295,12 @@ class Runner:
 
     def process_chapter(self, ch):
         log = self.log
+        self._last_chapter_note = ""
         # 每次打开都重新判断；占位状态不跨运行缓存。
         self._placeholder_skip = False
         page, cards = self._open_chapter(ch)
         if getattr(self, "_last_locked", False):
+            self._last_chapter_note = "章节未开放（平台限制）"
             log.info("  结果: skipped | 章节未开放，跳过（非错误）")
             self.report.add(ch.title, f"[未开放] {ch.title[:50]}", "skipped", "章节未开放（平台限制）")
             self.skipped_this_run.append(ch.title)
@@ -1455,6 +1548,7 @@ class Runner:
                 note += f"；复核：平台仍显示 {hint} 个未完成"
                 if status == "done":
                     status = "failed"
+        self._last_chapter_note = note
         self.report.add(ch.title, f"[{TYPE_LABEL.get(ctype, ctype)}] {ch.title[:50]}", status, note)
         log.info(f"  结果: {status} | {note}")
         # 占位章节（敬请期待/即将上线等）允许本轮跳过，但不持久缓存；下次仍会重开探测。
@@ -1883,7 +1977,7 @@ class Runner:
     STATE_POLL_S = 3.0
 
     def _verify_chapter(self, ch, rounds=5):
-        """复核小圆/平台状态：0=绿色已完成；-1=橙色 0（直接跳过）；>0=仍橙色；None=无法判定。
+        """复核小圆/平台状态：0=绿色已完成；-1=橙色 0（点进去并点「下一节」）；>0=仍橙色；None=无法判定。
 
         rounds=1 用于多页/多标签的快速检查；外层完整复核默认最多等 180 秒。
         状态出现即返回，不再按固定 15/25/60/90 秒干等。

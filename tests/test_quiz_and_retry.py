@@ -130,6 +130,7 @@ runner.course = type("C", (), {"name": "某测试课", "course_id": "1", "clazzi
 runner.humanizer = type("H", (), {"scroll": lambda self, p=None: None,
                                   "task_interval": lambda self, s=0: None})()
 runner._refresh_platform_progress = lambda chapters, quiet=False: None
+runner._try_local_repair = lambda ch, reason, note="": False
 
 chapters = [Chapter("a", "第1节", None, 1), Chapter("b", "第2节", None, 1), Chapter("c", "第3节", None, 1)]
 attempts = {"a": 0, "b": 0, "c": 0}
@@ -168,6 +169,7 @@ runner_gate.course = type("C", (), {"name": "某测试课", "course_id": "1", "c
 runner_gate.humanizer = type("H", (), {"scroll": lambda self, p=None: None,
                                        "task_interval": lambda self, s=0: None})()
 runner_gate._refresh_platform_progress = lambda chapters, quiet=False: None
+runner_gate._try_local_repair = lambda ch, reason, note="": False
 
 gate_chapters = [
     Chapter("skip0", "橙色0", None, -1),
@@ -175,6 +177,13 @@ gate_chapters = [
     Chapter("pending", "橙色1", None, 1),
 ]
 gate_attempts = {"skip0": 0, "done": 0, "pending": 0}
+zero_calls = {"n": 0}
+
+
+def gate_advance_zero(ch):
+    zero_calls["n"] += 1
+    ch.hint = -1
+    return "done"
 
 
 def gate_process(ch):
@@ -188,11 +197,13 @@ def gate_process(ch):
 
 
 runner_gate.process_chapter = gate_process
+runner_gate._advance_orange_zero = gate_advance_zero
 runner_gate._run_rounds(gate_chapters)
 
 assert gate_attempts == {"skip0": 0, "done": 0, "pending": 1}, gate_attempts
+assert zero_calls == {"n": 1}, zero_calls
 assert [c.id for c in runner_gate.failed_chapters] == ["pending"]
-print("[5] 小圆门控 OK（橙色0直接跳过 / 绿色通过 / 橙色1停止，不进入下一个）")
+print("[5] 小圆门控 OK（橙色0点进去点下一节 / 绿色通过 / 橙色1停止，不进入下一个）")
 
 # ---------------- 5b) 占位章节例外：本次跳过，不因橙色1卡住 ----------------
 cfg_ph = Config(load_config(str(CFG_PATH)))
@@ -205,6 +216,7 @@ runner_ph.course = type("C", (), {"name": "某测试课", "course_id": "1", "cla
 runner_ph.humanizer = type("H", (), {"scroll": lambda self, p=None: None,
                                      "task_interval": lambda self, s=0: None})()
 runner_ph._refresh_platform_progress = lambda chapters, quiet=False: None
+runner_ph._try_local_repair = lambda ch, reason, note="": False
 ph_chapters = [Chapter("ph", "敬请期待", None, 1)]
 ph_calls = {"n": 0}
 
@@ -233,6 +245,7 @@ runner_block.course = type("C", (), {"name": "某测试课", "course_id": "1", "
 runner_block.humanizer = type("H", (), {"scroll": lambda self, p=None: None,
                                         "task_interval": lambda self, s=0: None})()
 runner_block._refresh_platform_progress = lambda chapters, quiet=False: None
+runner_block._try_local_repair = lambda ch, reason, note="": False
 block_ch = Chapter("blocked", "被拦截题目", None, 1)
 block_calls = {"n": 0}
 

@@ -139,6 +139,12 @@ safety:
   min_task_interval_s: 3         # 任务之间最小间隔(秒)
   stop_on_risk: false            # true=遇风控立即停止；false=暂停等人工处理
   confirm_before_run: false      # true=非交互模式也在执行前打印计划并要求确认
+  local_repair:
+    enabled: true                # 出问题先唤起本机 WorkBuddy / TRAE 判断或维修，失败才转人工
+    timeout_s: 90                # 等待本地助手写回处理结果的最长秒数
+    workbuddy_exe: ""            # 可选：WorkBuddy.exe 路径；留空自动探测
+    trae_exe: ""                 # 可选：TRAE 路径；留空自动探测常见安装位置
+    command: []                  # 可选命令模板，如 ["python", "tools/local_repair_agent.py", "--request", "{request}", "--response", "{response}"]
 
 # ========== 作业 ==========
 homework:

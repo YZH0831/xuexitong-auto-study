@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """新增功能自测：课程单选/多选解析、拟人化延时、联网搜题解析与限额、安全限制。"""
 import argparse
+import json
 import logging
 import sys
 import tempfile
@@ -24,6 +25,7 @@ from cxlab.course import (  # noqa: E402
 import cxlab.course as course_mod  # noqa: E402
 from cxlab.humanize import Humanizer  # noqa: E402
 import cxlab.video as video_mod  # noqa: E402
+import cxlab.local_repair as local_repair_mod  # noqa: E402
 from cxlab.llm_answer import LLMAnswer  # noqa: E402
 from cxlab.online_answer import OnlineAnswer, looks_obfuscated  # noqa: E402
 from cxlab.runner import Runner  # noqa: E402
@@ -204,6 +206,10 @@ llm = LLMAnswer(cfg3, log)
 ans, conf, _ = llm._parse('{"answer":"切断电源","confidence":0.9}', [], "text")
 assert ans == "切断电源" and conf == 0.9, (ans, conf)
 
+# CI 没有 config.yaml，示例配置默认关闭大模型；这里强制启用测试额度逻辑。
+cfg3["quiz"]["llm"]["enabled"] = True
+cfg3["quiz"]["llm"]["api_key"] = "test-key"
+cfg3["quiz"]["llm"]["max_calls"] = 1
 llm2 = LLMAnswer(cfg3, log)
 llm2.max_calls = 1
 
@@ -369,5 +375,151 @@ assert video_mod.probe_playback_rate(_RateLimitedEl(1.0), 3.0) == 1.0
 assert any(h in "本视频禁止倍速播放" for h in video_mod.NOSPEED_HINT)
 assert video_mod.PLAYER_URL_HINTS[-1] == "modules/live"
 print("[9] 视频规则 OK（90% 完成线可识别；90%文案不误判禁倍速；明确禁倍速仍锁 1x）")
+
+# ---------------- 10) 橙色0：点进去、下滑、点下一节 ----------------
+args10 = argparse.Namespace(select="", pick=False, list_courses=False, dry_run=True,
+                            only="", headless=True, course="", config="config.yaml")
+runner10 = Runner(Config(load_config(str(CFG_PATH))), log, args10)
+runner10.report = type("R", (), {"add": lambda self, *a, **k: None})()
+runner10.popup = type("P", (), {"tick": lambda self, page=None: None})()
+calls10 = {"open": 0, "scroll": 0, "click": 0, "marks": None}
+
+
+def _open10(ch):
+    calls10["open"] += 1
+    return _FakeWaitPage(), None
+
+
+def _scroll10(page):
+    calls10["scroll"] += 1
+
+
+def _click10(page, marks=None):
+    calls10["click"] += 1
+    calls10["marks"] = marks
+    return True
+
+
+runner10._open_chapter = _open10
+runner10._scroll_to_bottom_for_next = _scroll10
+runner10._click_next_block = _click10
+ch10 = course_mod.Chapter("zero", "橙色0", None, -1)
+assert runner10._advance_orange_zero(ch10) == "done"
+assert calls10 == {"open": 1, "scroll": 1, "click": 1,
+                   "marks": ("下一节", "下一章")}, calls10
+
+# 没点到下一节时，不再直接进入后续章节
+runner10._click_next_block = lambda page, marks=None: False
+ch10b = course_mod.Chapter("zero2", "橙色0失败", None, -1)
+assert runner10._advance_orange_zero(ch10b) == "manual"
+assert ch10b.hint == 1
+print("[10] 橙色0推进 OK（点进去→下滑→点下一节；没点到则停止）")
+
+# ---------------- 11) 两类绿色标识 + 本地助手保底 ----------------
+assert course_mod.is_green_marker("catalog_state icon_yiwanc", "") is True   # 绿色勾
+assert course_mod.is_green_marker("catalog_jindu green", "") is True          # 绿色小圆
+assert course_mod.is_green_marker("", "已完成") is True
+assert course_mod.is_green_marker("catalog_jindu", "1") is False
+assert course_mod.is_green_marker("item incomplete", "") is False
+redacted = local_repair_mod._safe_text(
+    "Bearer abc.def token=secret123 https://example.com/x?enc=zzz")
+assert "abc.def" not in redacted and "secret123" not in redacted and "example.com" not in redacted
+
+with tempfile.TemporaryDirectory() as td:
+    fake_cmd = [
+        sys.executable, "-c",
+        "import json,pathlib,sys; pathlib.Path(sys.argv[1]).write_text("
+        "json.dumps({'handled': True, 'note': '模拟修复完成'}), encoding='utf-8')",
+        "{response}",
+    ]
+    lr = {"enabled": True, "timeout_s": 5, "command": fake_cmd}
+    ok, detail = local_repair_mod.request_repair(
+        lr, log, td, course_mod.Chapter("repair-probe", "修复探针", None, 1),
+        "测试本地助手响应协议", "不包含隐私",
+    )
+    assert ok and "模拟修复完成" in detail, (ok, detail)
+    repair_files = list((Path(td) / "output/local_repair").glob("*.json"))
+    assert repair_files
+    assert all("config.yaml" not in f.read_text(encoding="utf-8") for f in repair_files)
+
+args11 = argparse.Namespace(select="", pick=False, list_courses=False, dry_run=True,
+                            only="", headless=True, course="", config="config.yaml")
+runner11 = Runner(Config(load_config(str(CFG_PATH))), log, args11)
+runner11.report = type("R", (), {"add": lambda self, *a, **k: None})()
+repair_calls = {"n": 0, "result": True}
+_orig_request_repair = local_repair_mod.request_repair
+
+
+def _fake_request_repair(cfg, log, root, chapter, reason, note="", timeout_s=None):
+    repair_calls["n"] += 1
+    return repair_calls["result"], "本地助手测试响应"
+
+
+local_repair_mod.request_repair = _fake_request_repair
+try:
+    ch11 = course_mod.Chapter("fix", "待修复", None, 1)
+    assert runner11._try_local_repair(ch11, "测试问题", "测试说明") is True
+    assert runner11._try_local_repair(ch11, "再次测试") is False  # 同章本 run 只唤起一次
+    repair_calls["result"] = False
+    ch11b = course_mod.Chapter("manual", "最后人工", None, 1)
+    assert runner11._try_local_repair(ch11b, "测试人工") is False
+finally:
+    local_repair_mod.request_repair = _orig_request_repair
+assert repair_calls["n"] == 2, repair_calls
+print("[11] 绿色标识 + 本地助手保底 OK（两类绿色可识别；修复成功才重试，失败才人工）")
+
+# ---------------- 12) 运行器保底：修好重试，失败才最终人工 ----------------
+def _make_repair_runner(repair_ok):
+    args = argparse.Namespace(select="", pick=False, list_courses=False, dry_run=False,
+                              only="", headless=True, course="", config="config.yaml")
+    r = Runner(Config(load_config(str(CFG_PATH))), log, args)
+    r.report = type("R", (), {"add": lambda self, *a, **k: None})()
+    r.session = type("S", (), {"probe_session": lambda self, *a, **k: "ok", "page": None})()
+    r.course = type("C", (), {"name": "测试课", "course_id": "1", "clazzid": "2", "cpi": "3"})()
+    r.humanizer = type("H", (), {"scroll": lambda self, p=None: None,
+                                 "task_interval": lambda self, s=0: None})()
+    r._refresh_platform_progress = lambda chapters, quiet=False: None
+    r._ensure_session = lambda context="": True
+    r._try_local_repair = lambda ch, reason, note="": repair_ok
+    return r
+
+
+runner12 = _make_repair_runner(True)
+state12 = {"process": 0}
+
+
+def _process_first_fail_then_done(ch):
+    state12["process"] += 1
+    if state12["process"] == 1:
+        ch.hint = 1
+        return "manual"
+    ch.hint = 0
+    return "done"
+
+
+runner12.process_chapter = _process_first_fail_then_done
+ch12 = course_mod.Chapter("repair", "本地修复", None, 1)
+runner12._run_rounds([ch12])
+assert state12 == {"process": 2}, state12
+assert runner12.failed_chapters == []
+
+runner12b = _make_repair_runner(False)
+state12b = {"process": 0}
+
+
+def _process_always_manual(ch):
+    state12b["process"] += 1
+    ch.hint = 1
+    runner12b.failed_chapters.append(ch)
+    runner12b.failed_this_run.append(ch.title)
+    return "manual"
+
+
+runner12b.process_chapter = _process_always_manual
+ch12b = course_mod.Chapter("manual-final", "最终人工", None, 1)
+runner12b._run_rounds([ch12b])
+assert state12b == {"process": 1}, state12b
+assert [c.id for c in runner12b.failed_chapters] == ["manual-final"]
+print("[12] 本地助手保底调度 OK（修好→重试当前章节；失败→停止并转人工）")
 
 print("\n[OK] 新增功能自测全部通过")

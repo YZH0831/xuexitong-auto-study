@@ -133,6 +133,16 @@ DEFAULTS = {
         "stop_on_risk": False,       # 遇风控页是否直接停止（False=暂停等人工）
         "retry_rounds": 2,           # 未完成的知识点在本轮末尾重试几轮（不会直接跳过）
         "confirm_before_run": False,  # 是否在执行前要求确认（交互选择模式下自动为 True）
+        # 出问题先唤起本机 WorkBuddy / TRAE 判断或维修，失败才转人工。
+        "local_repair": {
+            "enabled": True,
+            "timeout_s": 90,
+            "workbuddy_exe": "",
+            "trae_exe": "",
+            # 可选命令模板，占位符 {request} / {response} / {prompt} 会被替换为实际路径。
+            # 例：["python", "tools/local_repair_agent.py", "--request", "{request}", "--response", "{response}"]
+            "command": [],
+        },
     },
     "homework": {
         "mode": "manual",

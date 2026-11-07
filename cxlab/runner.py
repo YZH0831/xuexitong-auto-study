@@ -280,6 +280,10 @@ class Runner:
         单端登录限制下，手机端登录会把电脑端顶下线，这里负责自愈。
         """
         cfg, log = self.cfg, self.log
+        # 平台弹过“多终端登录”提示后继续刷，可能顶掉用户当前会话或被判异常学习。
+        if getattr(self.session, "multi_terminal_alert", False):
+            log.error("[会话] 已出现多终端登录提示 → 暂停本轮，不再继续")
+            return False
         if not bool(cfg.login.auto_relogin):
             return True
         now = time.time()

@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import subprocess
 import sys
 import tempfile
 import time
@@ -760,5 +761,35 @@ finally:
 assert st16 == "done" and ct16 == "video" and len(_calls16) == 3, (st16, note16, ct16, _calls16)
 assert all(r == 0.9 for _, r in _calls16)
 print("[16] 多任务卡 OK（橙色3 → 依次处理3个任务卡，不会重复播第一个）")
+
+# ---------------- 17) WorkBuddy CLI 路径 + 多终端登录保护 ----------------
+from cxlab.browser import BrowserSession  # noqa: E402
+
+node17, cli17 = local_repair_mod._workbuddy_cli()
+if node17 and cli17:
+    assert cli17.name == "codebuddy-lite-wb.mjs", cli17
+    ver17 = subprocess.run([str(node17), str(cli17), "--version"],
+                           capture_output=True, text=True, timeout=20)
+    assert "2." in (ver17.stdout + ver17.stderr), ver17.stderr[-200:]
+
+class _Dialog17:
+    type = "alert"
+    message = "您的账号在一台谷歌内核浏览器设备登入章节页面。多终端登录可能会被判定异常学习。"
+
+    def accept(self):
+        return None
+
+
+browser17 = BrowserSession.__new__(BrowserSession)
+browser17.log = log
+browser17.multi_terminal_alert = False
+browser17._on_dialog(_Dialog17())
+assert browser17.multi_terminal_alert is True
+runner17 = Runner(Config(load_config(str(CFG_PATH))), log, argparse.Namespace(
+    select="", pick=False, list_courses=False, dry_run=True,
+    only="", headless=True, course="", config="config.yaml"))
+runner17.session = type("S", (), {"multi_terminal_alert": True})()
+assert runner17._ensure_session("测试") is False
+print("[17] 保底/会话保护 OK（CLI 使用 lite-wb 入口；多终端登录提示立即暂停）")
 
 print("\n[OK] 新增功能自测全部通过")

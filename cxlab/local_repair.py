@@ -21,7 +21,12 @@ def _workbuddy_cli():
     """返回 (node.exe, codebuddy CLI) —— 优先用 WorkBuddy 自带的无界面 CLI。"""
     resources = Path(os.environ.get("WORKBUDDY_RESOURCES_PATH")
                      or (Path.home() / "AppData/Local/Programs/WorkBuddy/resources"))
-    cli = resources / "app.asar.unpacked/cli/bin/codebuddy"
+    cli_root = resources / "app.asar.unpacked/cli"
+    # WorkBuddy 5.9.x 的 bin/codebuddy 会 require 不存在的 ../dist/codebuddy；
+    # 实际可用入口是 dist/codebuddy-lite-wb.mjs（已实测 --help / --version 正常）。
+    cli = cli_root / "dist/codebuddy-lite-wb.mjs"
+    if not cli.is_file():
+        cli = cli_root / "bin/codebuddy"
     if not cli.is_file():
         return None, None
     node_candidates = []

@@ -25,6 +25,7 @@ class BrowserSession:
         self.cfg = cfg
         self.log = log
         self._last_keepalive = 0.0
+        self.multi_terminal_alert = False
         self.pw = sync_playwright().start()
         self.browser = self._launch()
         storage = Path(cfg.state_dir) / "storage_state.json"
@@ -86,7 +87,12 @@ class BrowserSession:
     def _on_dialog(self, dialog):
         """自动接受 alert/confirm/beforeunload 弹窗（学习通常见的离开确认）。"""
         try:
-            self.log.info(f"[页面对话框] {dialog.type}: {dialog.message[:60]}")
+            msg = dialog.message or ""
+            self.log.info(f"[页面对话框] {dialog.type}: {msg[:60]}")
+            if any(k in msg for k in ("多终端登录", "谷歌内核浏览器设备登入")):
+                self.multi_terminal_alert = True
+                self.log.error("[多终端登录] 平台提示账号在另一浏览器设备登入章节页；"
+                               "本轮将暂停，避免继续顶号或触发异常学习判定")
             dialog.accept()
         except Exception:  # noqa: BLE001
             pass

@@ -906,4 +906,35 @@ assert st18 == "done" and ct18 == "video", (st18, note18, ct18)
 assert calls18 == [822, 469, 517], calls18
 print("[18] 小任务点 OK（mArg/jobid/isPassed/时长校验，逐个打开3个未完成视频）")
 
+# ---------------- 19) process_chapter 必须先走 jobid 小任务点，跳过旧分支 ----------------
+runner19 = Runner(Config(load_config(str(CFG_PATH))), log, argparse.Namespace(
+    select="", pick=False, list_courses=False, dry_run=True,
+    only="", headless=True, course="", config="config.yaml"))
+runner19.report = type("R", (), {"add": lambda self, *a, **k: None})()
+runner19._last_locked = False
+runner19.task_count = 0
+runner19._open_chapter = lambda ch: (object(), object())
+runner19._process_attachment_cards = lambda ch, page, cards: ("done", "按 jobid 处理 1/1 个小任务点", "video")
+runner19._verify_chapter = lambda ch, rounds=1: 0
+runner19._is_placeholder_note = lambda note: False
+runner19._refresh_platform_progress = lambda chapters, quiet=False: None
+
+
+def _forbidden_legacy(*a, **k):
+    raise AssertionError("jobid 分支应优先，旧 tab/多页分支不应执行")
+
+
+runner19._quiz_tabs = _forbidden_legacy
+runner19._page_tabs = _forbidden_legacy
+runner19._locate_quiz = _forbidden_legacy
+runner19._quiz_entry_candidates = _forbidden_legacy
+_orig_jobs19 = course_mod.card_jobs
+course_mod.card_jobs = lambda cards: [{"jobid": "A", "kind": "video", "passed": False}]
+try:
+    st19 = runner19.process_chapter(course_mod.Chapter("priority", "优先分支", None, 1))
+finally:
+    course_mod.card_jobs = _orig_jobs19
+assert st19 == "done"
+print("[19] 分支优先级 OK（mArg 小任务点先于 tab/多页/视频旧分支）")
+
 print("\n[OK] 新增功能自测全部通过")

@@ -497,6 +497,9 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
     alive_every = 45.0
 
     while True:
+        # 平台弹过“多终端登录”后立即停止，不再把当前视频播完。
+        if getattr(session, "multi_terminal_alert", False):
+            return "manual", "检测到多终端登录提示，已暂停本轮"
         # 会话健康检查：掉线/断网时由 runner 负责自动重登录或等待恢复
         if keepalive is not None:
             try:

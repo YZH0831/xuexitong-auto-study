@@ -1462,9 +1462,23 @@ class Runner:
         # 说明平台不可能“稍后补登记”，没必要干等 3 分钟复核。
         start_tasks = self.task_count
 
+        # 大任务点里若存在 mArg.attachments 小任务点，必须优先按 jobid 逐个处理；
+        # 旧版 tab / 多页 / 视频优先分支会抢先打开第一张卡，导致反复播已完成视频。
+        handled_by_jobs = False
+        if cards is not None and course_mod.card_jobs(cards):
+            multi_pre = self._process_attachment_cards(ch, page, cards)
+            if multi_pre is not None:
+                status, note, ctype = multi_pre
+                m = re.search(r"rate=([\d.]+)x", note or "")
+                if m:
+                    rate_used = float(m.group(1))
+            else:
+                status, note, ctype = "done", "小任务点全部已完成", "video"
+            handled_by_jobs = True
+
         # ①-A tab 式任务点（"1学习目标 / 2微课视频 / 3章节测验"）→ 逐个标签处理，按内容分派
-        tabs = self._quiz_tabs(page)
-        if tabs:
+        tabs = [] if handled_by_jobs else self._quiz_tabs(page)
+        if not handled_by_jobs and tabs:
             kinds = "、".join(f"{t[2]}({t[3]})" for t in tabs)
             log.info(f"  发现 {len(tabs)} 个任务点标签：{kinds}")
             handled = 0
@@ -1528,7 +1542,7 @@ class Runner:
                     page_c, _ = self._open_chapter(ch)
                     if self._continue_next_block(ch, page_c, 3):
                         status, note = "done", f"{note}；已用「下一节」继续后续内容"
-        elif (pm := self._page_tabs(page)) and not tabs:
+        elif not handled_by_jobs and (pm := self._page_tabs(page)) and not tabs:
             # ①-B 章节内多页（页签是纯数字，无"视频/测验"文字）→ 逐页处理
             # 这类章节平台端 totalcount 可能为 2，只做第 1 页会永远停在 1/2
             # 注意：切页后内容帧里可能暂时看不到视频，card_type 会误判成 quiz，
@@ -1575,7 +1589,8 @@ class Runner:
                     break
             status, note = last[0], f"多页处理 {handled}/{len(pm)} 页；{last[1]}"
             ctype = "multi"
-        elif cards is not None and course_mod.card_type(cards) in ("video", "document"):
+        elif (not handled_by_jobs and cards is not None
+              and course_mod.card_type(cards) in ("video", "document")):
             # ②-A 视频/文档优先。原实现把「测验入口」排在前面，导致本页面既
             #     有视频又有作业入口时只做了作业、视频永远不播（用户反馈 1.1 导论）。
             ctype = course_mod.card_type(cards)
@@ -1598,7 +1613,8 @@ class Runner:
                             ctype, status, note = "quiz", s_q, f"{note}；另：{n_q}"
                     else:
                         note += "；测验入口未打开答题页"
-        elif (self._locate_quiz(page)[0] is not None or self._quiz_entry_candidates(page)):
+        elif (not handled_by_jobs and
+              (self._locate_quiz(page)[0] is not None or self._quiz_entry_candidates(page))):
             # ②-B 页内有测验/作业入口（或答题页已内嵌）→ 逐个候选尝试打开，
             #     点了没反应自动换下一个，不再“点错一次空找两分钟”。
             log.info("  页内有测验/作业入口 → 逐个尝试打开答题页")
@@ -1633,7 +1649,7 @@ class Runner:
                                 m = re.search(r"rate=([\d.]+)x", n2 or "")
                                 if m:
                                     rate_used = float(m.group(1))
-        elif cards is not None:
+        elif not handled_by_jobs and cards is not None:
             multi = self._process_attachment_cards(ch, page, cards)
             if multi is not None:
                 status, note, ctype = multi
@@ -1643,12 +1659,12 @@ class Runner:
             m = re.search(r"rate=([\d.]+)x", note or "")
             if m:
                 rate_used = float(m.group(1))
-        elif self._type_from_title(ch.title) == "quiz":
+        elif not handled_by_jobs and self._type_from_title(ch.title) == "quiz":
             ctype = "quiz"
             self.task_count += 1
             self.humanizer.scroll(page)
             status, note = self._handle_quiz(page, ch)
-        else:
+        elif not handled_by_jobs:
             dump = f"{self.cfg.output_dir}/structure_ch{ch.id}.txt"
             course_mod.dump_structure(page, dump, log)
             status, note = "manual", f"未找到任务点容器（结构已导出 {dump}）"

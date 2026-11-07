@@ -1335,52 +1335,112 @@ class Runner:
         return None
 
     def _process_attachment_cards(self, ch, page, cards):
-        """逐张处理知识点内的未完成任务卡。
+        """按 jobid 逐个处理“大任务点里的小任务点”。
 
-        橙色小圆数字 = 当前知识点剩余任务卡数量。8.x 常见一个知识点里
-        有多个 videoContainer；旧逻辑只处理第一张，导致反复重播同一个视频。
-        返回 None 表示没有可处理的视频/音频/文档卡，交回原分派逻辑。
+        橙色小圆数字 = 剩余小任务点数。权威来源是 `mArg.attachments`：
+        每个视频/文档有独立 jobid、isPassed、attDuration。旧逻辑只认第一个
+        videoContainer，结果一直重播已完成的 516s 视频，另外 3 个根本没打开。
         """
-        items = course_mod.unfinished_task_cards(cards)
-        if not items:
-            return None
+        jobs = course_mod.card_jobs(cards)
         ratio = video_mod.detect_completion_ratio(page, default=None)
         log = self.log
-        log.info(f"  发现 {len(items)} 个未完成任务卡（橙色数字={ch.hint}）→ 逐卡处理")
         results = []
-        for idx, (_card, kind, iframe) in enumerate(items, 1):
-            if not self._should_handle("document" if kind == "document" else "video"):
-                continue
-            frame = self._frame_of_iframe(page, iframe)
-            if frame is None:
-                log.warning(f"   [{idx}/{len(items)}] {kind} 任务卡 iframe 未就绪 → 跳过")
-                results.append(("manual", "iframe 未就绪"))
-                continue
-            scope = _FrameScope(page, frame)
-            self.task_count += 1
-            self.humanizer.scroll(scope)
-            log.info(f"   [{idx}/{len(items)}] {kind} 任务卡 → 播放/阅读")
-            if kind in ("video", "audio"):
-                st, note = video_mod.play_video(
-                    self.session, self.cfg, log, scope, self.popup, None,
-                    completion_ratio=ratio, keepalive=self._ensure_session,
-                )
-            else:
-                st, note = document_mod.browse_document(
-                    self.session, self.cfg, log, scope, self.popup, None,
-                )
-            log.info(f"     → {st} | {str(note)[:80]}")
-            results.append((st, note))
-            hint_i = self._verify_chapter(ch, rounds=1)
-            if isinstance(hint_i, int) and hint_i == 0:
-                break
+        total = 0
+        ctype = "video"
+
+        if jobs:
+            todo = [j for j in jobs
+                    if not j["passed"] and j["kind"] in ("video", "audio", "document")]
+            total = len(todo)
+            ctype = "document" if all(j["kind"] == "document" for j in todo) else "video"
+            if not todo:
+                return "done", "小任务点全部已完成", "video"
+            log.info(f"  发现 {total} 个未完成小任务点（橙色数字={ch.hint}）→ 按 jobid 逐个打开")
+            for idx, job in enumerate(todo, 1):
+                target_id = job["jobid"]
+                page_i = page
+                if idx > 1:
+                    try:
+                        page_i, cards_i = self._open_chapter(ch)
+                        fresh = course_mod.card_jobs(cards_i)
+                        job = next((x for x in fresh if x["jobid"] == target_id), None)
+                    except Exception:  # noqa: BLE001
+                        job = None
+                    if job is None or job["passed"]:
+                        continue
+                kind = job["kind"]
+                if not self._should_handle("document" if kind == "document" else "video"):
+                    continue
+                card, iframe = job.get("card"), job.get("iframe")
+                try:
+                    icon = card.query_selector(".ans-job-icon") if card else None
+                    if icon is not None:
+                        icon.click(timeout=2000)
+                        page_i.wait_for_timeout(2500)
+                except Exception:  # noqa: BLE001
+                    pass
+                frame = self._frame_of_iframe(page_i, iframe)
+                if frame is None:
+                    log.warning(f"   [{idx}/{total}] {job['name'][:24]} iframe 未就绪 → 跳过")
+                    results.append(("manual", "iframe 未就绪"))
+                    continue
+                scope = _FrameScope(page_i, frame)
+                self.task_count += 1
+                self.humanizer.scroll(scope)
+                log.info(f"   [{idx}/{total}] {job['name'][:28]}（{job['duration']}s）→ 播放/阅读")
+                if kind in ("video", "audio"):
+                    st, note = video_mod.play_video(
+                        self.session, self.cfg, log, scope, self.popup, None,
+                        completion_ratio=ratio, expected_duration=job.get("duration"),
+                        keepalive=self._ensure_session,
+                    )
+                else:
+                    st, note = document_mod.browse_document(
+                        self.session, self.cfg, log, scope, self.popup, None,
+                    )
+                log.info(f"     → {st} | {str(note)[:80]}")
+                results.append((st, note))
+                hint_i = self._verify_chapter(ch, rounds=1)
+                if isinstance(hint_i, int) and hint_i == 0:
+                    break
+        else:
+            items = course_mod.unfinished_task_cards(cards)
+            total = len(items)
+            ctype = "document" if all(k == "document" for _, k, _ in items) else "video"
+            if not items:
+                return None
+            log.info(f"  发现 {total} 个未完成任务卡（橙色数字={ch.hint}）→ 逐卡处理")
+            for idx, (_card, kind, iframe) in enumerate(items, 1):
+                if not self._should_handle("document" if kind == "document" else "video"):
+                    continue
+                frame = self._frame_of_iframe(page, iframe)
+                if frame is None:
+                    results.append(("manual", "iframe 未就绪"))
+                    continue
+                scope = _FrameScope(page, frame)
+                self.task_count += 1
+                self.humanizer.scroll(scope)
+                if kind in ("video", "audio"):
+                    st, note = video_mod.play_video(
+                        self.session, self.cfg, log, scope, self.popup, None,
+                        completion_ratio=ratio, keepalive=self._ensure_session,
+                    )
+                else:
+                    st, note = document_mod.browse_document(
+                        self.session, self.cfg, log, scope, self.popup, None,
+                    )
+                results.append((st, note))
+                hint_i = self._verify_chapter(ch, rounds=1)
+                if isinstance(hint_i, int) and hint_i == 0:
+                    break
+
         if not results:
             return None
         statuses = [s for s, _ in results]
         status = "failed" if "failed" in statuses else ("done" if "done" in statuses else "manual")
         detail = results[0][1]
-        note = f"逐卡处理 {len(results)}/{len(items)} 个任务点" + (f"；{detail}" if detail else "")
-        ctype = "document" if all(k == "document" for _, k, _ in items) else "video"
+        prefix = "按 jobid 处理" if jobs else "逐卡处理"
+        note = f"{prefix} {len(results)}/{total} 个小任务点" + (f"；{detail}" if detail else "")
         return status, note, ctype
 
     def process_chapter(self, ch):

@@ -792,4 +792,118 @@ runner17.session = type("S", (), {"multi_terminal_alert": True})()
 assert runner17._ensure_session("测试") is False
 print("[17] 保底/会话保护 OK（CLI 使用 lite-wb 入口；多终端登录提示立即暂停）")
 
+# ---------------- 18) 大任务点内的小任务点：mArg.attachments / jobid / 时长校验 ----------------
+html18 = '''mArg = "";
+try { mArg = {"attachments":[
+ {"job":true,"type":"video","jobid":"A","attDuration":822,"property":{"name":"文化安全.mp4"}},
+ {"isPassed":true,"type":"video","jobid":"B","attDuration":516,"property":{"name":"军事安全.mp4"}},
+ {"job":true,"type":"video","jobid":"C","attDuration":469,"property":{"name":"科技安全.mp4"}},
+ {"job":true,"type":"video","jobid":"D","attDuration":517,"property":{"name":"社会安全.mp4"}}
+]}; } catch(e) {}'''
+atts18 = course_mod.parse_marg_attachments(html18)
+assert len(atts18) == 4
+assert video_mod.duration_matches(516, 516) is True
+assert video_mod.duration_matches(822, 516) is False
+
+
+class _Iframe18:
+    def __init__(self, jobid):
+        self.jobid = jobid
+
+    def get_attribute(self, name):
+        return json.dumps({"jobid": self.jobid, "_jobid": self.jobid}) if name == "data" else ""
+
+
+class _Card18:
+    def __init__(self, jobid):
+        self.jobid = jobid
+
+    def query_selector(self, sel):
+        return _Iframe18(self.jobid) if sel == "iframe" else object()
+
+
+class _CardsFrame18:
+    def evaluate(self, script):
+        return atts18
+
+    def query_selector_all(self, sel):
+        return [_Card18(str(a.get("jobid"))) for a in atts18]
+
+
+jobs18 = course_mod.card_jobs(_CardsFrame18())
+assert len(jobs18) == 4 and sum(j["passed"] for j in jobs18) == 1
+assert [j["duration"] for j in jobs18 if not j["passed"]] == [822, 469, 517]
+
+runner18 = Runner(Config(load_config(str(CFG_PATH))), log, argparse.Namespace(
+    select="", pick=False, list_courses=False, dry_run=True,
+    only="", headless=True, course="", config="config.yaml"))
+runner18.report = type("R", (), {"add": lambda self, *a, **k: None})()
+runner18.session = type("S", (), {"keep_alive": lambda self: None})()
+runner18.popup = type("P", (), {"tick": lambda self, page=None: None})()
+runner18.humanizer = type("H", (), {"scroll": lambda self, page=None: None,
+                                    "task_interval": lambda self, s=0: None})()
+runner18._should_handle = lambda kind: True
+runner18._frame_of_iframe = lambda page, iframe: object()
+
+
+class _Icon18:
+    def click(self, timeout=None):
+        return None
+
+
+class _TaskCard18:
+    def query_selector(self, sel):
+        return _Icon18()
+
+
+class _Page18:
+    def wait_for_timeout(self, ms):
+        return None
+
+
+page18 = _Page18()
+runner18._open_chapter = lambda ch: (page18, object())
+verify18 = {"n": 0, "hints": [2, 1, 0]}
+
+
+def _verify18(ch, rounds=1):
+    hint = verify18["hints"][min(verify18["n"], 2)]
+    verify18["n"] += 1
+    return hint
+
+
+runner18._verify_chapter = _verify18
+calls18 = []
+_orig_play18 = video_mod.play_video
+_orig_ratio18 = video_mod.detect_completion_ratio
+_orig_jobs18 = course_mod.card_jobs
+video_mod.detect_completion_ratio = lambda page, default=None: 0.9
+
+
+def _fake_play18(session, cfg, log, page, popup, tp, force_rate=None,
+                 keepalive=None, completion_ratio=None, expected_duration=None):
+    calls18.append(expected_duration)
+    return "done", "fake small task"
+
+
+video_mod.play_video = _fake_play18
+course_mod.card_jobs = lambda cards: [
+    {"jobid": "A", "kind": "video", "passed": False, "duration": 822,
+     "name": "文化安全.mp4", "card": _TaskCard18(), "iframe": object()},
+    {"jobid": "C", "kind": "video", "passed": False, "duration": 469,
+     "name": "科技安全.mp4", "card": _TaskCard18(), "iframe": object()},
+    {"jobid": "D", "kind": "video", "passed": False, "duration": 517,
+     "name": "社会安全.mp4", "card": _TaskCard18(), "iframe": object()},
+]
+try:
+    st18, note18, ct18 = runner18._process_attachment_cards(
+        course_mod.Chapter("subtasks", "大任务点", None, 3), page18, object())
+finally:
+    video_mod.play_video = _orig_play18
+    video_mod.detect_completion_ratio = _orig_ratio18
+    course_mod.card_jobs = _orig_jobs18
+assert st18 == "done" and ct18 == "video", (st18, note18, ct18)
+assert calls18 == [822, 469, 517], calls18
+print("[18] 小任务点 OK（mArg/jobid/isPassed/时长校验，逐个打开3个未完成视频）")
+
 print("\n[OK] 新增功能自测全部通过")

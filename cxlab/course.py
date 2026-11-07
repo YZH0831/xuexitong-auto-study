@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """课程定位、章节树与任务点解析、平台状态核验。"""
+import html
+import json
 import re
 import threading
 import time
@@ -937,6 +939,99 @@ def unfinished_task_cards(cards_frame):
                 kind = "unknown"
             if kind in ("video", "audio", "document"):
                 out.append((card, kind, iframe))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def parse_marg_attachments(text):
+    """从 knowledge/cards 原始 HTML 解析 mArg.attachments（只读备用）。"""
+    try:
+        text = str(text or "")
+        starts = [m.start(1) for m in re.finditer(r"mArg\s*=\s*(\{)", text)]
+        if not starts:
+            return []
+        obj, _ = json.JSONDecoder().raw_decode(text[starts[-1]:])
+        return obj.get("attachments") or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def card_jobs(cards_frame):
+    """读取“大任务点里的小任务点”权威清单：mArg.attachments。
+
+    返回 [{jobid, kind, passed, duration, name, card, iframe}, ...]。
+    isPassed / job 来自平台；DOM 的 ans-job-finished 只作兜底展示。
+    """
+    attachments = []
+    try:
+        attachments = cards_frame.evaluate(
+            "() => (window.mArg && window.mArg.attachments) || []"
+        ) or []
+    except Exception:  # noqa: BLE001
+        attachments = []
+    if not attachments:
+        try:
+            attachments = parse_marg_attachments(cards_frame.content())
+        except Exception:  # noqa: BLE001
+            attachments = []
+
+    by_job = {}
+    try:
+        cards = cards_frame.query_selector_all(".ans-attach-ct")
+    except Exception:  # noqa: BLE001
+        cards = []
+    for card in cards:
+        try:
+            iframe = card.query_selector("iframe")
+            raw = html.unescape(iframe.get_attribute("data") or "") if iframe else ""
+            obj = json.loads(raw) if raw else {}
+            jobid = str(obj.get("jobid") or obj.get("_jobid") or "")
+            if jobid:
+                by_job[jobid] = (card, iframe)
+        except Exception:  # noqa: BLE001
+            continue
+
+    out = []
+    for att in attachments:
+        try:
+            prop = att.get("property") or {}
+            kind = str(att.get("type") or prop.get("module") or "").lower()
+            if kind in ("insertvideo", "video"):
+                kind = "video"
+            elif kind in ("insertaudio", "audio"):
+                kind = "audio"
+            elif kind in ("insertdoc", "document", "pdf"):
+                kind = "document"
+            else:
+                continue
+            jobid = str(att.get("jobid") or att.get("_jobid") or prop.get("jobid") or "")
+            if not jobid:
+                continue
+            if kind == "document" and not att.get("job"):
+                continue
+            passed = bool(att.get("isPassed")) or (
+                kind in ("video", "audio") and not att.get("job")
+            )
+            card, iframe = by_job.get(jobid, (None, None))
+            try:
+                duration = int(att.get("attDuration") or 0)
+            except (TypeError, ValueError):
+                duration = 0
+            if not duration:
+                try:
+                    duration = max(0, int(prop.get("v_end") or 0) - int(prop.get("v_begin") or 0))
+                except (TypeError, ValueError):
+                    duration = 0
+            out.append({
+                "jobid": jobid,
+                "kind": kind,
+                "passed": passed,
+                "duration": duration,
+                "name": str(prop.get("name") or att.get("name") or ""),
+                "card": card,
+                "iframe": iframe,
+            })
         except Exception:  # noqa: BLE001
             continue
     return out

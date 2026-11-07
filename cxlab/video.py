@@ -234,6 +234,18 @@ def parse_completion_ratio(text, default=1.0):
     return max(ratios) / 100.0 if ratios else default
 
 
+def duration_matches(actual, expected):
+    """校验播放器加载的是不是目标小任务点视频。"""
+    try:
+        actual = float(actual or 0)
+        expected = float(expected or 0)
+    except (TypeError, ValueError):
+        return True
+    if actual <= 0 or expected <= 0:
+        return True
+    return abs(actual - expected) <= max(20.0, expected * 0.15)
+
+
 def detect_completion_ratio(page, default=1.0):
     """遍历所有帧，读取本视频/直播的完成百分比；没有明确文案返回 default。"""
     best = default
@@ -409,7 +421,7 @@ def tick_video_overlays(page, log, quiz_solver=None):
 
 
 def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=None,
-               completion_ratio=None):
+               completion_ratio=None, expected_duration=None):
     """播放当前页视频，返回 (status, note)。
 
     force_rate: 强制倍速（用于"倍速未被登记 → 用 1x 重播"的兜底）。
@@ -547,6 +559,9 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
 
         dur = state.get("dur", 0)
         ct = state.get("ct", 0)
+        if expected_duration and dur > 0 and not duration_matches(dur, expected_duration):
+            return "manual", (f"播放器加载的不是目标小任务点视频"
+                             f"（{dur:.0f}s vs 目标 {expected_duration:.0f}s）")
 
         if state.get("ended") or (
                 dur > 0 and ct >= dur * completion - 0.4):

@@ -26,6 +26,13 @@ JS_SET_RATE = """
 }
 """
 
+JS_SEEK = """
+(el, t) => {
+  try { el.currentTime = Math.max(0, Number(t) || 0); } catch (e) {}
+  return el.currentTime || 0;
+}
+"""
+
 JS_STATE = """
 (el) => ({
   ct: el.currentTime || 0,
@@ -421,13 +428,16 @@ def tick_video_overlays(page, log, quiz_solver=None):
 
 
 def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=None,
-               completion_ratio=None, expected_duration=None):
+               completion_ratio=None, expected_duration=None, require_real_watch=False):
     """播放当前页视频，返回 (status, note)。
 
     force_rate: 强制倍速（用于"倍速未被登记 → 用 1x 重播"的兜底）。
     keepalive : 回调（每次轮询调用），返回 False 表示会话中断需停止播放。
     completion_ratio: 外层页面（如直播卡片）要求的完成比例；直播跳到新标签后
                       目标页往往看不到这段规则，需要从原页面带过来。
+    require_real_watch: 直播回放专用。平台按“累计观看时长”核验，播放器进度被
+                      拖到 90% 不等于已看够；开启后先回到片头，用真实观看秒数
+                      判定完成，避免 1 秒“秒过”后平台仍显示未完成。
     """
     vcfg = cfg.video
 
@@ -480,6 +490,16 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
         except Exception as exc:  # noqa: BLE001
             log.debug(f"  视频弹题自动作答初始化失败: {str(exc)[:80]}")
 
+    if require_real_watch:
+        # 直播回放的完成条件是“累计观看时长 ≥ 总时长×完成线”，
+        # 而播放器进度可能已被上一次 3x 播放推到 90% 以上。
+        # 不回到片头的话，第一次轮询就会判定到线，实际一秒都没看。
+        try:
+            el.evaluate(JS_SEEK, 0.0)
+            log.info("  直播回放按累计观看时长核验 → 已回到片头，按真实时长重看")
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"  回到片头失败（忽略）: {str(exc)[:60]}")
+
     _kick(el, rate, frame, log)
 
     limit_s = float(vcfg.timeout_per_video_min) * 60
@@ -492,6 +512,10 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
     hidden_ticks = 0
     last_alive = 0.0
     last_overlay_check = 0.0
+    # 直播回放的真实观看累计（仅“在播 + 页面可见 + 1x”时计时）
+    real_watch = 0.0
+    last_tick = time.time()
+    seek_blocked = False
     # 每 45 秒动一次鼠标：鼠标长时间静止时平台可能判为挂机、不计观看时长
     # （实测纯视频章节全部复核失败，而带测验的章节因做题时鼠标在动反而成功）
     alive_every = 45.0
@@ -532,9 +556,11 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
                 return "manual", "视频弹题出现，需本地助手/人工作答"
 
         # 平台规则：观看时「不可离开或将页面最小化」；后台运行可能导致不计时
+        hidden_now = False
         try:
             vis = page.evaluate(JS_VISIBILITY)
             if vis and vis.get("hidden"):
+                hidden_now = True
                 hidden_ticks += 1
                 if hidden_ticks in (2, 30):
                     log.warning("  浏览器窗口处于后台/最小化：平台可能暂停计时或不计入观看时长，"
@@ -543,6 +569,14 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
                 hidden_ticks = 0
         except Exception:  # noqa: BLE001
             pass
+
+        # 真实观看累计：只在“正在播 + 页面可见 + 1x”时计时，
+        # 因为平台按真实时长核验，倍速与后台都不计入。
+        now = time.time()
+        if require_real_watch:
+            if (not state.get("paused")) and (not hidden_now) and rate <= 1.01:
+                real_watch += max(0.0, now - last_tick)
+        last_tick = now
 
         # 拟人保活：播放期间定期小幅移动鼠标（不点击，避免把视频点暂停），
         # 让平台看到"人还在看"，避免防挂机机制把这段时间判为无效观看。
@@ -566,8 +600,42 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
             return "manual", (f"播放器加载的不是目标小任务点视频"
                              f"（{dur:.0f}s vs 目标 {expected_duration:.0f}s）")
 
-        if state.get("ended") or (
-                dur > 0 and ct >= dur * completion - 0.4):
+        reached = state.get("ended") or (dur > 0 and ct >= dur * completion - 0.4)
+        if require_real_watch:
+            need = dur * completion if dur > 0 else 0.0
+            if need > 0 and real_watch >= need:
+                log.info(f"  已真实观看 {real_watch/60:.1f} 分钟"
+                         f"（需 {need/60:.1f} 分钟）→ 完成")
+                break
+            if reached:
+                if need > 0:
+                    if seek_blocked:
+                        return "manual", (f"回放不允许拖动进度，真实观看仅 "
+                                          f"{real_watch/60:.1f}/{need/60:.1f} 分钟，需人工处理")
+                    # 位置到片尾但累计观看时长不够（倍速/拖动导致），回到片头继续累计
+                    log.info(f"  播放位置已到片尾，但真实观看仅 {real_watch/60:.1f}/"
+                             f"{need/60:.1f} 分钟 → 回到片头继续")
+                    before = ct
+                    try:
+                        el.evaluate(JS_SEEK, 0.0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    page.wait_for_timeout(1200)
+                    try:
+                        after = float((el.evaluate(JS_STATE) or {}).get("ct") or 0)
+                    except Exception:  # noqa: BLE001
+                        after = before
+                    if after >= before - 1.0 and after >= dur * completion - 1.0:
+                        # 位置仍在完成线附近说明拖动没生效（平台锁了进度条）
+                        seek_blocked = True
+                        log.warning("  拖动回放进度未生效 → 若再看不够将转人工")
+                    last_ct = -1.0
+                    stall = 0
+                    _kick(el, rate, frame, log)
+                    continue
+                log.info(f"  播放完成（用时 {elapsed/60:.1f} 分钟）")
+                break
+        elif reached:
             if dur > 0 and ct < dur - 0.5:
                 log.info(f"  已达到完成线 {completion:.0%}（{ct:.0f}/{dur:.0f}s，"
                          f"用时 {elapsed/60:.1f} 分钟）")
@@ -615,8 +683,9 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
             return "failed", f"播放超时（{vcfg.timeout_per_video_min} 分钟），进度 {ct:.0f}s"
 
         if int(elapsed) % 60 < poll and dur > 0:
+            extra = f" · 已真实观看 {real_watch/60:.1f} 分钟" if require_real_watch else ""
             log.info(f"  进度 {ct:.0f}/{dur:.0f}s ({ct/dur*100:.0f}%)"
-                     f" · 完成线 {completion:.0%}")
+                     f" · 完成线 {completion:.0%}{extra}")
         time.sleep(poll)
 
     # 给平台一点时间登记完成状态。

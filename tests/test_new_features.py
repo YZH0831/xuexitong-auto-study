@@ -551,8 +551,9 @@ video_mod.detect_completion_ratio = lambda page, default=None: 0.9
 
 
 def _fake_play13(session, cfg, log, page, popup, tp, force_rate=None,
-                 keepalive=None, completion_ratio=None):
-    _seen13.update(force_rate=force_rate, completion=completion_ratio)
+                 keepalive=None, completion_ratio=None, require_real_watch=False):
+    _seen13.update(force_rate=force_rate, completion=completion_ratio,
+                   real_watch=require_real_watch)
     return "done", "fake live play"
 
 
@@ -563,7 +564,8 @@ try:
 finally:
     video_mod.detect_completion_ratio = _orig_detect13
     video_mod.play_video = _orig_play13
-assert status13 == "done" and _seen13 == {"force_rate": 1.0, "completion": 0.9}, _seen13
+assert status13 == "done" and _seen13 == {
+    "force_rate": 1.0, "completion": 0.9, "real_watch": True}, _seen13
 print("[13] 直播 1x 重播 OK（重新点 liveHref，force_rate/completion 正确透传）")
 
 # ---------------- 14) 视频批注/弹题覆盖层 ----------------
@@ -936,5 +938,103 @@ finally:
     course_mod.card_jobs = _orig_jobs19
 assert st19 == "done"
 print("[19] 分支优先级 OK（mArg 小任务点先于 tab/多页/视频旧分支）")
+
+# ---------------- 20) 直播回放：进度已在 90% 也必须真实看满 ----------------
+class _LiveEl:
+    """模拟直播回放播放器：打开时进度就停在 95%，一进来几乎到片尾。"""
+
+    def __init__(self, dur, ended=False):
+        self.dur = float(dur)
+        self.ct = self.dur * 0.95
+        self.paused = False
+        self.ended = ended
+        self.seeks = []
+
+    def evaluate(self, js, arg=None):
+        if js is video_mod.JS_SEEK:
+            t = max(0.0, float(arg or 0))
+            self.seeks.append(t)
+            self.ct = t
+            return self.ct
+        if js is video_mod.JS_PLAY:
+            self.paused = False
+            return True
+        if js is video_mod.JS_SET_RATE:
+            return 1.0
+        if js is video_mod.JS_STATE:
+            return {"ct": self.ct, "dur": self.dur, "paused": self.paused,
+                    "ended": self.ended, "rate": 1.0}
+        return None
+
+    def click(self, timeout=None):
+        return None
+
+
+class _LivePage20:
+    viewport_size = {"width": 1280, "height": 720}
+    mouse = type("M", (), {"move": lambda self, *a, **k: None})()
+
+    def __init__(self):
+        self.frames = []
+
+    def evaluate(self, js, arg=None):
+        if js is video_mod.JS_VISIBILITY:
+            return {"hidden": False}
+        return None
+
+    def wait_for_timeout(self, ms):
+        return None
+
+
+cfg20 = Config(load_config(str(CFG_PATH)))
+cfg20["video"]["speed"] = 3.0
+cfg20["video"]["duration_required_1x"] = True
+cfg20["video"]["answer_popup_quiz"] = False
+cfg20["video"]["timeout_per_video_min"] = 1
+cfg20["video"]["poll_interval_s"] = 0.01
+
+log20 = logging.getLogger("t20")
+session20 = type("S", (), {"keep_alive": lambda self: None,
+                           "multi_terminal_alert": False})()
+popup20 = type("P", (), {"tick": lambda self, page=None: None})()
+
+_orig20 = {name: getattr(video_mod, name) for name in (
+    "find_player_frame", "prepare_player", "find_video_element",
+    "detect_rules", "detect_completion_ratio", "probe_playback_rate",
+    "tick_video_overlays")}
+video_mod.find_player_frame = lambda page, timeout_s=20: None
+video_mod.prepare_player = lambda player, log: None
+video_mod.detect_rules = lambda page: (None, False)
+video_mod.detect_completion_ratio = lambda page, default=None: 0.9
+video_mod.probe_playback_rate = lambda el, rate=3.0: 1.0
+video_mod.tick_video_overlays = lambda page, log, quiz_solver=None: ""
+
+try:
+    # ① 进度已在 95%：必须回到片头，并按真实观看秒数判定
+    el20 = _LiveEl(dur=4.0)
+    video_mod.find_video_element = lambda page, timeout_s=30: (None, el20)
+    st20, note20 = video_mod.play_video(
+        session20, cfg20, log20, _LivePage20(), popup20, None,
+        force_rate=1.0, completion_ratio=0.9, require_real_watch=True,
+    )
+    assert st20 == "done", (st20, note20)
+    assert el20.seeks and el20.seeks[0] == 0.0, el20.seeks
+    # 需要真实看满 4.0*0.9=3.6s；旧逻辑会在第一次轮询就判到线并 0 秒退出，
+    # 这里通过“确实回到片头 + 走到累计完成”验证不会秒过。
+
+    # ② 播放器直接报 ended 但累计不足：必须回到片头继续，而不是判完成
+    el20b = _LiveEl(dur=4.0, ended=True)
+    video_mod.find_video_element = lambda page, timeout_s=30: (None, el20b)
+    st20b, note20b = video_mod.play_video(
+        session20, cfg20, log20, _LivePage20(), popup20, None,
+        force_rate=1.0, completion_ratio=0.9, require_real_watch=True,
+    )
+    assert st20b == "done", (st20b, note20b)
+    assert len(el20b.seeks) >= 2, el20b.seeks  # 开头一次 + ended 回片头一次
+finally:
+    for name, fn in _orig20.items():
+        setattr(video_mod, name, fn)
+
+print("[20] 直播回放 OK（进度已在90%也先回片头，按真实观看时长判定）")
 
 print("\n[OK] 新增功能自测全部通过")

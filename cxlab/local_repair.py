@@ -115,6 +115,22 @@ def _launch(parts, root, out_dir, log):
         return None
 
 
+def _cli_failure_hint(out_dir):
+    """从 CLI 输出尾部判断失败原因，避免只报一句“未写回结果”。"""
+    try:
+        text = (Path(out_dir) / "launcher.log").read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return ""
+    tail = text[-4000:].lower()
+    if "authentication required" in tail or "please use /login" in tail:
+        return "；原因：WorkBuddy CLI 未登录（先在 WorkBuddy 里登录再重试）"
+    if "module_not_found" in tail or "cannot find module" in tail:
+        return "；原因：CLI 入口缺失（WorkBuddy 升级后路径变化）"
+    if "invalid api key" in tail or "unauthorized" in tail:
+        return "；原因：WorkBuddy 账号授权失效"
+    return ""
+
+
 def request_repair(cfg, log, project_root, chapter, reason, note="", timeout_s=None):
     """唤起本地助手判断/维修，返回 (是否处理成功, 说明)。
 
@@ -213,7 +229,8 @@ def request_repair(cfg, log, project_root, chapter, reason, note="", timeout_s=N
                 break
             time.sleep(0.5)
         if proc.poll() is not None and not response_path.exists():
-            return False, f"WorkBuddy CLI 已退出（code={proc.returncode}）但未写回结果"
+            hint = _cli_failure_hint(out_dir)
+            return False, f"WorkBuddy CLI 已退出（code={proc.returncode}）但未写回结果{hint}"
 
     raw_timeout = timeout_s if timeout_s is not None else lr.get("timeout_s", DEFAULT_TIMEOUT_S)
     try:

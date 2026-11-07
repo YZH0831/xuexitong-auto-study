@@ -1837,6 +1837,14 @@ class Runner:
             log.info(f"  直播完成线：{completion_hint:.0%}")
         else:
             log.info("  直播卡片未写明确完成线 → 由播放器页再检测（找不到则按 100%）")
+        # 记下回放链接：点击有时打不开新标签，直接导航比反复点击更可靠。
+        live_href = ""
+        try:
+            live_href = (el.get_attribute("href") or "").strip()
+        except Exception:  # noqa: BLE001
+            live_href = ""
+        if not live_href.lower().startswith("http"):
+            live_href = ""
         try:
             before_pages = {id(p) for p in self.session.context.pages}
         except Exception:  # noqa: BLE001
@@ -1864,6 +1872,15 @@ class Runner:
             page.wait_for_timeout(500)
         if live_page is None and "zhibo.chaoxing.com" in (target.url or "").lower():
             live_page = target
+        if live_page is None and live_href:
+            # 兜底：点击可能被拦或复用旧标签，直接新开一页导航到回放地址。
+            try:
+                np = self.session.context.new_page()
+                np.goto(live_href, wait_until="domcontentloaded", timeout=45000)
+                live_page = np
+                log.info("  点击未捕获新标签页 → 已直接打开回放链接")
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"  直接打开回放链接失败: {str(exc)[:80]}")
         if live_page is None:
             log.warning("  点了直播入口，但没有捕获到直播标签页 → 转人工")
             return "manual", "直播入口已点击，但未打开直播页"
@@ -1875,10 +1892,18 @@ class Runner:
         self.popup.tick(live_page)
         try:
             log.info(f"  直播页已打开: {live_page.url[:100]}")
+            is_replay = "zhibo.chaoxing.com" in (live_page.url or "").lower()
+            if is_replay:
+                # 平台对直播/回放按“累计观看时长”核验，3x 不计数，
+                # 播放器进度被拖到 90% 也不算完成 → 必须 1x 真实播满。
+                if force_rate is None or force_rate > 1.0:
+                    log.info("  直播回放按累计观看时长核验 → 本次强制 1 倍速真实播放")
+                    force_rate = 1.0
             status, note = video_mod.play_video(
                 self.session, self.cfg, log, live_page, self.popup, None,
                 force_rate=force_rate, keepalive=self._ensure_session,
                 completion_ratio=completion_hint,
+                require_real_watch=is_replay,
             )
             return status, f"直播回放：{note}"
         finally:

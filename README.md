@@ -3,13 +3,13 @@
 ![CI](https://github.com/YZH0831/xuexitong-auto-study/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
-![Version](https://img.shields.io/badge/version-v1.1.0-orange)
+![Version](https://img.shields.io/badge/version-v1.1.1-orange)
 
 > 用 **真实浏览器**（Playwright 驱动本机 Edge）完成学习通/超星课程的视频、音频、课件、章节测验，
 > 带**字体混淆解码**、**选项顺序对齐**、**题库→大模型→双源搜题→兜底推理**四级答题链路，
 > 以及**环境自检 / 密钥图形设置 / 密钥扫描**等工程化配套。
 
-当前版本：**v1.1.0**（2026-11-14）｜平台：Windows 10/11（另有 macOS/Linux 的 `.sh` 脚本）｜许可：GPL-3.0
+当前版本：**v1.1.1**（2026-11-14）｜平台：Windows 10/11（另有 macOS/Linux 的 `.sh` 脚本）｜许可：GPL-3.0
 GitHub 仓库：https://github.com/YZH0831/xuexitong-auto-study
 
 ---
@@ -147,7 +147,7 @@ fonttools>=4.60       # 解析加密字体（题面还原）
 
 ```
 ============================================================
-               学习通自动化助手  v1.1.0
+               学习通自动化助手  v1.1.1
 ============================================================
    大模型答题：[已启用] deepseek-flash  sk-e98***2099
 ------------------------------------------------------------
@@ -194,11 +194,15 @@ start.bat tiku     :: 题库配置
 | 参数 | 作用 |
 |---|---|
 | `--dry-run` | 只扫描章节/任务点结构，不实际学习 |
-| `--select` | 指定课程（名称关键词或 courseId），逗号分隔可多选，`all` 表示全部 |
+| `--select` | 指定课程（名称关键词或 courseId），逗号分隔可多选并按书写顺序执行，`all` 表示全部 |
 | `--only {video,document,quiz}` | 只处理某类任务点 |
 | `--lessons "1-5,8"` | 只学指定课时序号；也支持 `"课程名=1-3;另一门=2,4"` |
-| `--pick` | 交互：字母多选课程 → 选课时范围 → 确认执行 |
+| `--pick` | 交互：字母多选课程 → 选课时范围 → 确认执行；输入顺序即执行顺序 |
 | `--headless` | 无界面运行（扫码/验证码场景别用） |
+
+**执行顺序**：`--select`、`course.selected_courses`、`--pick` 与 `--lessons` 一律**按你书写/勾选的顺序**执行，
+不再按字母或平台返回的课程列表顺序重排（例如写 `C A B` 就按 C→A→B 刷）。
+Web 控制台「选择课程」里每门课左侧的序号就是执行顺序，可用 ↑ / ↓ 直接调整。
 
 ### 配置密钥（可选）
 

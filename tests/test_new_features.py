@@ -21,7 +21,8 @@ log = logging.getLogger("test")
 
 from cxlab.config import Config, load_config  # noqa: E402
 from cxlab.course import (  # noqa: E402
-    is_all_spec, label_for, label_index, match_course, parse_index_spec, split_tokens,
+    is_all_spec, label_for, label_index, match_course, match_courses_in_order,
+    parse_index_spec, parse_index_spec_ordered, split_tokens,
 )
 import cxlab.course as course_mod  # noqa: E402
 from cxlab.humanize import Humanizer  # noqa: E402
@@ -61,6 +62,23 @@ assert parse_index_spec("1,A", 10) == {1}              # 混合（1 与 A 同为
 assert parse_index_spec("all", 5) == {1, 2, 3, 4, 5}
 assert parse_index_spec("", 5) == {1, 2, 3, 4, 5}      # 空 = 全部
 assert parse_index_spec("99", 5) == set()              # 越界被过滤
+
+# 顺序：用户写什么顺序就按什么顺序刷，不再按字母/序号升序
+assert parse_index_spec_ordered("C A B", 10) == [3, 1, 2]
+assert parse_index_spec_ordered("A-C", 10) == [1, 2, 3]
+assert parse_index_spec_ordered("C-A", 10) == [3, 2, 1]
+assert parse_index_spec_ordered("6,1,3", 10) == [6, 1, 3]
+assert parse_index_spec_ordered("A,A,3", 10) == [1, 3]      # 去重且保序
+assert parse_index_spec_ordered("all", 3) == [1, 2, 3]
+assert parse_index_spec_ordered("99", 5) == []
+cards_order = [
+    {"name": "A 课程", "course_id": "1", "url": "u1"},
+    {"name": "B 课程", "course_id": "2", "url": "u2"},
+    {"name": "C 课程", "course_id": "3", "url": "u3"},
+]
+assert [c["name"] for c in match_courses_in_order(cards_order, ["C 课程", "A 课程"])] == ["C 课程", "A 课程"]
+assert [c["name"] for c in match_courses_in_order(cards_order, ["课程"])] == ["A 课程", "B 课程", "C 课程"]
+assert [c["name"] for c in match_courses_in_order(cards_order, ["B 课程", "B 课程"])] == ["B 课程"]
 assert is_all_spec("all") and is_all_spec("") and is_all_spec("全部")
 assert not is_all_spec("A"), "字母 A 是有效课程标签，不能被当作全选"
 print("[1b] 字母标签 + 课时多选表达式（A C F / A-C / 1,3,5-8 / all）OK")

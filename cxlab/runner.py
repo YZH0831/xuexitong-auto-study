@@ -485,12 +485,12 @@ class Runner:
         if course_mod.is_all_spec(spec):
             self.log.info(f"【{course.name}】课时范围：全部 {len(chapters)} 个")
             return chapters
-        idx = course_mod.parse_index_spec(spec, len(chapters))
+        idx = course_mod.parse_index_spec_ordered(spec, len(chapters))
         if not idx:
             # 选择条件无效时不能扩大为全部课时，否则一次手误会执行整门课程。
             self.log.warning(f"【{course.name}】课时表达式「{spec}」未匹配到课时 → 跳过本课程，请检查表达式")
             return []
-        chosen = [ch for i, ch in enumerate(chapters, 1) if i in idx]
+        chosen = [chapters[i - 1] for i in idx]
         self.log.info(
             f"【{course.name}】课时筛选{('（' + source + '）') if source else ''}："
             f"{len(chapters)} → {len(chosen)} 个（规则：{spec}）"

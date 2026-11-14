@@ -350,15 +350,24 @@ def is_all_spec(spec):
     return s in ("", "all", "*", "全部", "所有", "全选")
 
 
-def parse_index_spec(spec, total=None):
-    """解析多选表达式 → set(1-based 序号)。
+def parse_index_spec_ordered(spec, total=None):
+    """解析多选表达式 → 按书写顺序排列的 1-based 序号列表（去重、保序）。
 
-    支持混合写法：`1,3,5` / `2-5` / `A,C` / `A-C` / `1,A`（数字与字母混用）；
-    `all`/`*`/`全部`/空 → 返回全部（需给 total）。无法解析的部分忽略。
+    与 parse_index_spec 的区别：不按序号（字母）排序，写 `C A B` 就按 3,1,2 执行。
+    区间按书写方向展开：`A-C` → [1,2,3]，`C-A` → [3,2,1]。
+    `all`/`*`/`全部`/空 → 全部（需给 total）。无法解析的部分忽略。
     """
     if is_all_spec(spec):
-        return set(range(1, int(total) + 1)) if total else set()
-    result = set()
+        return list(range(1, int(total) + 1)) if total else []
+    result, seen = [], set()
+
+    def add(i):
+        if total and not (1 <= i <= int(total)):
+            return
+        if i not in seen:
+            seen.add(i)
+            result.append(i)
+
     for part in re.split(r"[,，;；\s]+", str(spec).strip()):
         if not part:
             continue
@@ -366,22 +375,50 @@ def parse_index_spec(spec, total=None):
         if m:
             a, b = label_index(m.group(1)), label_index(m.group(2))
             if a and b:
-                result.update(range(min(a, b), max(a, b) + 1))
+                step = 1 if a <= b else -1
+                for i in range(a, b + step, step):
+                    add(i)
             continue
         m = re.match(r"^(\d+)\s*[-~]\s*(\d+)$", part)
         if m:
             a, b = int(m.group(1)), int(m.group(2))
-            result.update(range(min(a, b), max(a, b) + 1))
+            step = 1 if a <= b else -1
+            for i in range(a, b + step, step):
+                add(i)
             continue
         if part.isdigit():
-            result.add(int(part))
+            add(int(part))
             continue
         li = label_index(part)
         if li:
-            result.add(li)
-    if total:
-        result = {i for i in result if 1 <= i <= int(total)}
+            add(li)
     return result
+
+
+def parse_index_spec(spec, total=None):
+    """解析多选表达式 → set(1-based 序号)。
+
+    只表达「包含哪些」，不表达顺序；要按用户输入顺序执行请用 parse_index_spec_ordered。
+    """
+    return set(parse_index_spec_ordered(spec, total))
+
+
+def match_courses_in_order(cards, tokens):
+    """按 tokens 的先后顺序挑课程（同一 token 命中多门时仍按列表顺序），并去重。
+
+    `--select` / `selected_courses` 走这里：用户写「C 课, A 课」就按这个顺序刷，
+    而不是按平台返回的字母/列表顺序。
+    """
+    chosen, seen = [], set()
+    for t in tokens:
+        for c in cards:
+            key = (c.get("name"), c.get("course_id"), c.get("url"))
+            if key in seen:
+                continue
+            if match_course(c, t):
+                seen.add(key)
+                chosen.append(c)
+    return chosen
 
 
 def read_line(prompt, timeout_s, log, default=""):
@@ -425,7 +462,7 @@ def pick_courses_interactively(cards, log, timeout_s=180):
         status = c.get("status") or "unknown"
         tag = STATUS_LABELS.get(status, status)
         print(f"  [{label_for(i):>2}] {c['name']}    [{tag}] {c.get('status_reason', '')}")
-    print("  输入示例：A C F（多门）｜A-C（区间）｜1,3（序号）｜all（全部）｜active（只选可处理的）")
+    print("  输入示例：C A F（按输入顺序执行）｜A-C（区间）｜1,3（序号）｜all（全部）｜active（只选可处理的）")
     raw = read_line(">>> 请输入后回车: ", timeout_s, log, "")
     if str(raw).strip().lower() in ("active", "可处理", "有效"):
         picked = [c for c in cards if (c.get("status") or "unknown") in ("active", "unknown")]
@@ -436,13 +473,13 @@ def pick_courses_interactively(cards, log, timeout_s=180):
             log.warning("未输入，默认处理全部课程")
         return cards
 
-    idx = parse_index_spec(raw, len(cards))
+    idx = parse_index_spec_ordered(raw, len(cards))
     if idx:
-        chosen = [cards[i - 1] for i in sorted(idx)]
-        log.info("已选择课程：" + "、".join(c["name"] for c in chosen))
+        chosen = [cards[i - 1] for i in idx]
+        log.info("已选择课程（按输入顺序）：" + "、".join(c["name"] for c in chosen))
         return chosen
 
-    picked = [c for c in cards if any(match_course(c, t) for t in split_tokens(raw))]
+    picked = match_courses_in_order(cards, split_tokens(raw))
     if picked:
         log.info("已选择课程：" + "、".join(c["name"] for c in picked))
         return picked
@@ -801,14 +838,14 @@ def choose_courses(session, cfg, log, cli_select=""):
         log.info("配置为「全部课程」，将逐门处理")
         chosen = cards
     else:
-        chosen = [c for c in cards if any(match_course(c, t) for t in tokens)]
+        chosen = match_courses_in_order(cards, tokens)
         if not chosen:
             names = "、".join(c["name"] for c in cards[:20])
             raise RuntimeError(
                 f"没有课程匹配 {tokens}。当前账号的课程有：{names}"
                 "（用 '*' 或 --select all 处理全部课程）"
             )
-        log.info("已按条件选中：" + "、".join(c["name"] for c in chosen))
+        log.info("已按条件选中（按指定顺序）：" + "、".join(c["name"] for c in chosen))
     result = []
     for c in chosen[:MAX_COURSES]:
         result.append(CourseInfo(

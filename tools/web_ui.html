@@ -488,12 +488,18 @@ async function sendInput(){
 }
 async function openDir(t){const r=await post('/api/open',{target:t});toast(r.message,r.ok?'ok':'bad')}
 
-let pickerState={items:[],selected:new Set(),lessonMode:'all',lessonInput:''};
+let pickerState={items:[],selected:[],lessonMode:'all',lessonInput:''};
+function moveSel(name,delta,stale,source){
+  const i=pickerState.selected.indexOf(name),j=i+delta;
+  if(i<0||j<0||j>=pickerState.selected.length)return;
+  const t=pickerState.selected[j];pickerState.selected[j]=pickerState.selected[i];pickerState.selected[i]=t;
+  renderPicker(stale,source);
+}
 function isActionable(c){return !/已完成|已结束|已退课|无任务|未开课/.test(c.status||'')}
 async function openPicker(){
   const d=await api('/api/courses');
   pickerState.items=d.items||[];
-  pickerState.selected=new Set(pickerState.items.filter(isActionable).map(c=>c.name));
+  pickerState.selected=[];
   renderPicker(!!d.stale,d.source||'');
 }
 function renderPicker(stale,source){
@@ -502,7 +508,7 @@ function renderPicker(stale,source){
   tip.style.cssText='font-size:12.5px;color:#8a9ab8;line-height:1.7;margin-bottom:13px';
   if(pickerState.items.length){
     const from=source==='log'?'（这是历史日志快照，新加的课程可能不在这里；正在自动从平台拉取，请稍后重开本窗口，或点「从平台拉取」）':(stale?'（清单可能过期，正在自动拉取最新课程）':'');
-    tip.textContent=`共 ${pickerState.items.length} 门课程${from}。勾选要学习的课程，默认勾选可处理的课程。`;
+    tip.textContent=`共 ${pickerState.items.length} 门课程${from}。默认不勾选，请手动选择；左侧序号就是刷课执行顺序，可用 ↑↓ 调整。`;
   }else{
     tip.textContent='还没有课程清单。点下方「从平台拉取」会打开浏览器读取你账号下的课程（需要登录/扫码）。';
   }
@@ -511,12 +517,12 @@ function renderPicker(stale,source){
   if(pickerState.items.length){
     const tools=document.createElement('div');
     tools.style.cssText='display:flex;gap:8px;margin-bottom:11px;flex-wrap:wrap;align-items:center';
-    tools.appendChild(btn('全选',()=>{pickerState.items.forEach(c=>pickerState.selected.add(c.name));renderPicker(stale,source)},'ghost sm'));
-    tools.appendChild(btn('只选可处理',()=>{pickerState.selected=new Set(pickerState.items.filter(isActionable).map(c=>c.name));renderPicker(stale,source)},'ghost sm'));
-    tools.appendChild(btn('清空',()=>{pickerState.selected.clear();renderPicker(stale,source)},'ghost sm'));
+    tools.appendChild(btn('全选',()=>{pickerState.selected=pickerState.items.map(c=>c.name);renderPicker(stale,source)},'ghost sm'));
+    tools.appendChild(btn('只选可处理',()=>{pickerState.selected=pickerState.items.filter(isActionable).map(c=>c.name);renderPicker(stale,source)},'ghost sm'));
+    tools.appendChild(btn('清空',()=>{pickerState.selected=[];renderPicker(stale,source)},'ghost sm'));
     const cnt=document.createElement('span');
     cnt.style.cssText='font-size:11.5px;color:#5d6b88;margin-left:auto';
-    cnt.textContent='已选 '+pickerState.selected.size+' 门';
+    cnt.textContent='已选 '+pickerState.selected.length+' 门（按序号执行）';
     tools.appendChild(cnt);
     box.appendChild(tools);
 
@@ -525,16 +531,34 @@ function renderPicker(stale,source){
     pickerState.items.forEach(c=>{
       const row=document.createElement('label');
       row.className='rep-item';row.style.marginBottom='6px';
+      const oi=pickerState.selected.indexOf(c.name);
       const cb=document.createElement('input');
-      cb.type='checkbox';cb.checked=pickerState.selected.has(c.name);
+      cb.type='checkbox';cb.checked=oi>=0;
       cb.style.cssText='width:16px;height:16px;accent-color:#6d8bff;cursor:pointer;flex:none';
-      cb.onchange=()=>{cb.checked?pickerState.selected.add(c.name):pickerState.selected.delete(c.name);renderPicker(stale,source)};
+      cb.onchange=()=>{
+        const i=pickerState.selected.indexOf(c.name);
+        if(cb.checked&&i<0)pickerState.selected.push(c.name);
+        else if(!cb.checked&&i>=0)pickerState.selected.splice(i,1);
+        renderPicker(stale,source);
+      };
+      const ord=document.createElement('span');
+      ord.textContent=oi>=0?String(oi+1).padStart(2,'0'):'--';
+      ord.title='刷课执行顺序';
+      ord.style.cssText='font:11px var(--mono);color:#6d8bff;min-width:22px;text-align:center;flex:none';
       const nm=document.createElement('span');nm.className='nm';
+      nm.style.cssText='flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
       nm.textContent=(c.label?'['+c.label+'] ':'')+c.name;
       const st=document.createElement('span');st.className='mt';
       st.textContent=(c.status||'')+(c.course_id?'  #'+c.course_id:'');
       st.style.color=/已完成/.test(c.status)?'#6d7d9b':(/可处理|进行中|待完成/.test(c.status)?'#35d6a4':'#ffc857');
-      row.appendChild(cb);row.appendChild(nm);row.appendChild(st);
+      row.appendChild(cb);row.appendChild(ord);row.appendChild(nm);row.appendChild(st);
+      if(oi>=0){
+        const up=btn('↑',e=>{e.preventDefault();e.stopPropagation();moveSel(c.name,-1,stale,source)},'ghost sm');
+        const dn=btn('↓',e=>{e.preventDefault();e.stopPropagation();moveSel(c.name,1,stale,source)},'ghost sm');
+        for(const mb of [up,dn])mb.style.cssText='padding:2px 7px;font-size:12px;line-height:1.2;min-width:26px;flex:none';
+        up.disabled=oi===0;dn.disabled=oi===pickerState.selected.length-1;
+        row.appendChild(up);row.appendChild(dn);
+      }
       list.appendChild(row);
     });
     box.appendChild(list);
@@ -569,7 +593,7 @@ async function fetchCourses(force){
   const r=await post('/api/courses/fetch',{force:!!force});
   if(r.ok){
     pickerState.items=r.items||[];
-    pickerState.selected=new Set(pickerState.items.filter(isActionable).map(c=>c.name));
+    pickerState.selected=[];
     toast(r.message||'已获取课程');
     renderPicker(false,'cache');
     return;
@@ -581,7 +605,7 @@ async function fetchCourses(force){
   toast(r.message||'拉取失败','bad');
 }
 async function startPicked(force){
-  const names=[...pickerState.selected];
+  const names=pickerState.selected.slice();
   if(!names.length){toast('请先勾选课程','bad');return}
   const lessons=pickerState.lessonMode==='some'?pickerState.lessonInput.trim():'';
   const r=await post('/api/run',{cmd:'run',select:names.join(','),lessons,force:!!force});

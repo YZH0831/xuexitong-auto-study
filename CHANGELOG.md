@@ -2,6 +2,34 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.1.0] - 2026-11-14
+
+本地 Web 控制台、无人值守守护，以及章节推进策略调整。
+
+### 新增（功能）
+
+- **本地 Web 控制台** `tools/web_ui.py` / `tools/web_ui.html` + `webui.bat`：零第三方依赖，
+  只监听 127.0.0.1、命令白名单；浏览器里看状态/日志/配置/课程/报告，可启动、停止任务、
+  跑环境自检、向运行中的程序送入交互输入；`webui.bat` 用 `pythonw` 无黑框启动，已有窗口会被唤到前台。
+- **无人值守守护** `tools/keepalive.py` + `keepalive.bat`：主程序退出后按退避策略自动续跑，
+  运行期间阻止系统空闲睡眠；`keepalive.bat stop` 发停止信号，日志在 `logs/keepalive.log`。
+
+### 变更
+
+- **灰色「未开放」章节直接跳过**：不点进去、不触发门控、不中断整轮，下一轮重新探测是否已开放；
+  橙色 0 且没有「下一节」入口的章节同样按「往下跳」处理并记 `skipped`。
+- **章节复核不再阻塞整轮**：处理完复核小圆，未变绿的记为「需人工」，本轮末尾统一重试，
+  报告里集中列出待人工条目。
+- `safety.local_repair.enabled` 默认改为 `false`（`timeout_s` 180 → 30）：无界面 CLI 拿不到
+  正在运行的浏览器会话，实测无法修复只会白等并在 `output/local_repair/` 堆积请求文件；
+  确有需要可显式开启，或用 `command` 接自己的修复脚本。
+
+### 修复
+
+- `runner` / `course`：按 `jobid` 逐个处理大任务点下的小任务点、优先处理子任务、多端告警时暂停播放。
+- `browser` / `video` / `config` / `local_repair`：配合上述策略的适配与默认项调整。
+- `tests/test_new_features.py`、`tests/test_quiz_and_retry.py`：补齐上述场景的离线用例。
+
 ## [1.0.0] - 2026-10-28
 
 首个可分发版本。相对早期内部脚本（v0.x），本版把"能跑"提升到"可交付"。

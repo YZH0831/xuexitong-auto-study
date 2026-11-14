@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""本地助手保底修复：先唤起 WorkBuddy / TRAE 判断或维修，失败才转人工。
+"""本地助手保底修复（默认关闭）：唤起 WorkBuddy / TRAE 判断或维修，失败转人工。
+
+注意：无界面 CLI 只有 Read/Edit/Write，拿不到正在运行的浏览器会话，
+对"页面卡住/小圆没变绿"这类运行时状态天然无能为力，实测多次唤起均失败。
+因此默认 enabled=False，失败时直接转人工，不再空等、不再堆请求文件。
+确需使用时在 config.yaml 的 safety.local_repair 打开，或用 command 接自己的修复脚本。
 
 设计原则：
 - 只把最小化的脱敏问题信息写到 `output/local_repair/`（该目录已被 .gitignore 排除）；
@@ -14,7 +19,7 @@ import subprocess
 import time
 from pathlib import Path
 
-DEFAULT_TIMEOUT_S = 180
+DEFAULT_TIMEOUT_S = 30
 
 
 def _workbuddy_cli():
@@ -140,7 +145,7 @@ def request_repair(cfg, log, project_root, chapter, reason, note="", timeout_s=N
     也兼容 {"status": "handled"} / {"status": "manual"}。
     """
     lr = cfg or {}
-    if not bool(lr.get("enabled", True)):
+    if not bool(lr.get("enabled", False)):
         return False, "本地助手保底未启用"
 
     root = Path(project_root)

@@ -26,6 +26,7 @@ class BrowserSession:
         self.log = log
         self._last_keepalive = 0.0
         self.multi_terminal_alert = False
+        self.multi_terminal_at = 0.0        # 最近一次多终端登录提示的时间
         self.pw = sync_playwright().start()
         self.browser = self._launch()
         storage = Path(cfg.state_dir) / "storage_state.json"
@@ -91,8 +92,9 @@ class BrowserSession:
             self.log.info(f"[页面对话框] {dialog.type}: {msg[:60]}")
             if any(k in msg for k in ("多终端登录", "谷歌内核浏览器设备登入")):
                 self.multi_terminal_alert = True
-                self.log.error("[多终端登录] 平台提示账号在另一浏览器设备登入章节页；"
-                               "本轮将暂停，避免继续顶号或触发异常学习判定")
+                self.multi_terminal_at = time.time()
+                self.log.error("[多终端登录] 平台提示账号在另一浏览器设备登入；"
+                               "将等待 60 秒后自动重连并继续本轮")
             dialog.accept()
         except Exception:  # noqa: BLE001
             pass

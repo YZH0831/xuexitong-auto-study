@@ -18,7 +18,7 @@ log = logging.getLogger("test")
 
 from cxlab.answers import QuestionBank  # noqa: E402
 from cxlab.config import Config, load_config  # noqa: E402
-from cxlab.course import Chapter  # noqa: E402
+from cxlab.course import Chapter, LOCKED_HINT  # noqa: E402
 from cxlab.quiz import fill_answer, judge_index, Question  # noqa: E402
 from cxlab.runner import Runner  # noqa: E402
 from cxlab.report import Report  # noqa: E402
@@ -200,10 +200,11 @@ runner_gate.process_chapter = gate_process
 runner_gate._advance_orange_zero = gate_advance_zero
 runner_gate._run_rounds(gate_chapters)
 
-assert gate_attempts == {"skip0": 0, "done": 0, "pending": 1}, gate_attempts
+assert gate_attempts["skip0"] == 0 and gate_attempts["done"] == 0, gate_attempts
+assert gate_attempts["pending"] >= 1, gate_attempts  # 记为需人工，末尾重试轮会再试
 assert zero_calls == {"n": 1}, zero_calls
 assert [c.id for c in runner_gate.failed_chapters] == ["pending"]
-print("[5] 小圆门控 OK（橙色0点进去点下一节 / 绿色通过 / 橙色1停止，不进入下一个）")
+print("[5] 小圆门控 OK（橙色0点进去点下一节 / 绿色通过 / 橙色1记为需人工并重试，不中断整轮）")
 
 # ---------------- 5b) 占位章节例外：本次跳过，不因橙色1卡住 ----------------
 cfg_ph = Config(load_config(str(CFG_PATH)))
@@ -233,6 +234,100 @@ runner_ph._run_rounds(ph_chapters)
 assert ph_calls == {"n": 1}, ph_calls
 assert runner_ph.failed_chapters == [], runner_ph.failed_chapters
 print("[5b] 占位章节例外 OK（本次跳过，不卡门控；下次运行仍重新探测）")
+
+# ---------------- 5d) 灰色未开放小圆：直接跳过往下走，不停止本轮 ----------------
+cfg_lk = Config(load_config(str(CFG_PATH)))
+args_lk = argparse.Namespace(select="", pick=False, list_courses=False, dry_run=False,
+                             only="", headless=True, course="", config="config.yaml")
+runner_lk = Runner(cfg_lk, log, args_lk)
+runner_lk.report = Report("某测试课", ROOT / "output", log)
+runner_lk.session = type("S", (), {"probe_session": lambda self, *a, **k: "ok", "page": None})()
+runner_lk.course = type("C", (), {"name": "某测试课", "course_id": "1", "clazzid": "2", "cpi": "3"})()
+runner_lk.humanizer = type("H", (), {"scroll": lambda self, p=None: None,
+                                     "task_interval": lambda self, s=0: None})()
+runner_lk._refresh_platform_progress = lambda chapters, quiet=False: None
+
+
+def lk_no_repair(ch, reason, note=""):
+    raise AssertionError(f"未开放章节不应唤起本地助手: {reason}")
+
+
+runner_lk._try_local_repair = lk_no_repair
+lk_chapters = [
+    Chapter("lk1", "灰色未开放(树上)", None, LOCKED_HINT),
+    Chapter("zero", "橙色0进去才发现未开放", None, -1),
+    Chapter("lk2", "灰色未开放(树上2)", None, LOCKED_HINT),
+    Chapter("ok", "正常可学", None, 1),
+]
+lk_calls = {"advance": [], "process": []}
+
+
+def lk_advance(ch):
+    lk_calls["advance"].append(ch.id)
+    ch.hint = LOCKED_HINT
+    return "skipped"
+
+
+def lk_process(ch):
+    lk_calls["process"].append(ch.id)
+    ch.hint = 0
+    return "done"
+
+
+runner_lk._advance_orange_zero = lk_advance
+runner_lk.process_chapter = lk_process
+runner_lk._run_rounds(lk_chapters)
+assert lk_calls == {"advance": ["zero"], "process": ["ok"]}, lk_calls
+assert runner_lk.failed_chapters == [], runner_lk.failed_chapters
+print("[5d] 灰色未开放 OK（树上直接跳过 / 橙色0进去确认未开放也跳过，均继续往下不停止）")
+
+# ---------------- 5e) 单个章节失败不再中断整轮 ----------------
+cfg_go = Config(load_config(str(CFG_PATH)))
+args_go = argparse.Namespace(select="", pick=False, list_courses=False, dry_run=False,
+                             only="", headless=True, course="", config="config.yaml")
+runner_go = Runner(cfg_go, log, args_go)
+runner_go.report = Report("某测试课", ROOT / "output", log)
+runner_go.session = type("S", (), {"probe_session": lambda self, *a, **k: "ok", "page": None})()
+runner_go.course = type("C", (), {"name": "某测试课", "course_id": "1", "clazzid": "2", "cpi": "3"})()
+runner_go.humanizer = type("H", (), {"scroll": lambda self, p=None: None,
+                                     "task_interval": lambda self, s=0: None})()
+runner_go._refresh_platform_progress = lambda chapters, quiet=False: None
+runner_go._try_local_repair = lambda ch, reason, note="": False
+go_calls = []
+
+
+def go_process(ch):
+    go_calls.append(ch.id)
+    if ch.id == "bad":
+        ch.hint = 1
+        return "failed"
+    ch.hint = 0
+    return "done"
+
+
+runner_go.process_chapter = go_process
+runner_go._run_rounds([Chapter("bad", "卡住的章节", None, 1),
+                       Chapter("good", "后面的章节", None, 1)])
+assert go_calls.count("good") == 1, go_calls  # 失败章节后面的仍被处理
+assert "卡住的章节" in runner_go.failed_this_run
+assert {c.id for c in runner_go.failed_chapters} == {"bad"}
+print("[5e] 单章失败不中断 OK（记为需人工，后续章节照常处理，末尾统一重试）")
+
+# ---------------- 5f) 橙色0推不动 → 直接跳过往下走 ----------------
+cfg_z = Config(load_config(str(CFG_PATH)))
+args_z = argparse.Namespace(select="", pick=False, list_courses=False, dry_run=False,
+                            only="", headless=True, course="", config="config.yaml")
+runner_z = Runner(cfg_z, log, args_z)
+runner_z.report = Report("某测试课", ROOT / "output", log)
+runner_z._last_locked = False
+runner_z._open_chapter = lambda ch, need_cards=True: (None, None)
+runner_z._scroll_to_bottom_for_next = lambda page: None
+runner_z._click_next_block = lambda page, marks=None: False
+runner_z._chapter_locked = lambda page: False
+z_ch = Chapter("zero", "灰色无下一节", None, -1)
+assert runner_z._advance_orange_zero(z_ch) == "skipped"
+assert z_ch.hint == LOCKED_HINT
+print("[5f] 橙色0无「下一节」OK（记 skipped 后继续后续章节，不再停止整轮）")
 
 # ---------------- 5c) 平台拦截提交：本 run 不再自动重提 ----------------
 cfg_block = Config(load_config(str(CFG_PATH)))

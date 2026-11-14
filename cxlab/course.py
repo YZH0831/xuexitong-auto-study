@@ -470,10 +470,15 @@ class Chapter:
         self.id = str(cid)
         self.title = title
         self.element = element
-        self.hint = hint          # None=未知；0=已完成；>0=未完成任务点数
+        # None=未知；0=已完成；>0=未完成任务点数；-1=橙色0(无任务点)；-2=灰色未开放(直接跳过)
+        self.hint = hint
 
     def __repr__(self):
         return f"Chapter({self.id}, {self.title!r}, hint={self.hint})"
+
+
+LOCKED_HINT = -2  # 灰色未开放小圆：不点进去、不门控、直接往下跳
+LOCKED_WORDS = ("未开放", "不能查看", "暂不能学")
 
 
 class TaskPoint:
@@ -583,15 +588,35 @@ JS_COURSE_CARDS = r"""
 """
 
 
+def _all_docs(page):
+    """课程列表常在 iframe 里，点「更多」还可能开新标签页 → 遍历所有页面/框架。"""
+    docs = []
+    try:
+        pages = list(page.context.pages)
+    except Exception:  # noqa: BLE001
+        pages = [page]
+    for pg in pages:
+        try:
+            if pg.is_closed():
+                continue
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            docs.extend(all_frames(pg))
+        except Exception:  # noqa: BLE001
+            docs.append(pg)
+    return docs
+
+
 def _collect_courses(page):
-    """跨 frame 采集课程卡片（单次 JS/帧）。
+    """跨页面 / 跨 frame 采集课程卡片（单次 JS/帧）。
 
     返回 [{name,url,course_id,clazzid,cpi,text}]；text 保留卡片原文，
     用于解析「开课时间：…～…」等状态信息。
     """
     items = []
     seen = set()
-    for frame in all_frames(page):
+    for frame in _all_docs(page):
         try:
             cards = frame.evaluate(JS_COURSE_CARDS) or []
         except Exception:  # noqa: BLE001
@@ -618,7 +643,7 @@ def _collect_courses(page):
 
 def _scroll_all(page):
     """把每个 frame 滚到底，触发懒加载 / 无限滚动。"""
-    for frame in all_frames(page):
+    for frame in _all_docs(page):
         try:
             frame.evaluate(
                 "() => { try { window.scrollTo(0, document.body.scrollHeight); } catch (e) {} }"
@@ -631,6 +656,8 @@ def _scroll_all(page):
 MORE_ENTRY_SELECTORS = (
     "text=更多课程",
     "text=查看更多",
+    "text=查看全部",
+    "text=全部课程",
     "#moreCourse",
     ".more-course",
     "a[href*='morecourse']",
@@ -638,17 +665,18 @@ MORE_ENTRY_SELECTORS = (
 
 
 def _try_expand_more(page):
-    """尝试点开「更多课程」入口。成功返回 True。"""
-    for sel in MORE_ENTRY_SELECTORS:
-        try:
-            el = page.query_selector(sel)
-            if el is None or not el.is_visible():
+    """尝试点开「更多课程」入口（首页按钮通常在 iframe 内）。成功返回 True。"""
+    for doc in _all_docs(page):
+        for sel in MORE_ENTRY_SELECTORS:
+            try:
+                el = doc.query_selector(sel)
+                if el is None or not el.is_visible():
+                    continue
+                el.click()
+                page.wait_for_timeout(1600)
+                return True
+            except Exception:  # noqa: BLE001
                 continue
-            el.click()
-            page.wait_for_timeout(1600)
-            return True
-        except Exception:  # noqa: BLE001
-            continue
     return False
 
 
@@ -663,22 +691,23 @@ def _wait_cards(page, wait_s):
     best = []
     last_len = -1
     stable = 0
-    tried_expand = False
+    expand_tries = 0
     while time.time() < deadline:
         cards = _collect_courses(page)
         if len(cards) > len(best):
             best = cards
         if best:
             _scroll_all(page)
-            # 首屏常见上限恰好是 8 门，命中说明可能被截断，尝试展开一次
-            if not tried_expand and len(best) <= 8:
-                tried_expand = True
+            # 首屏常见上限恰好是 8 门；按钮可能延迟渲染 / 在 iframe 里，多试几次
+            if expand_tries < 3 and len(best) <= 8:
+                expand_tries += 1
                 if _try_expand_more(page):
                     page.wait_for_timeout(1200)
+                    stable = 0
                     continue
             if len(best) == last_len:
                 stable += 1
-                if stable >= 2:
+                if stable >= 3:
                     return best
             else:
                 stable = 0
@@ -706,6 +735,7 @@ def list_courses(session, cfg, log, wait_s=25):
         except Exception:  # noqa: BLE001
             pass
         cards = _wait_cards(page, 15)
+    log.info(f"课程卡片采集完成：共 {len(cards)} 门（含新加课程）")
     return cards
 
 
@@ -1149,6 +1179,18 @@ JS_CHAPTERS = r"""
     if (greenCheck || greenCircle) {
       return {state: 'green', hint: 0, marker: greenCheck ? 'check' : 'circle'};
     }
+    // 灰色未开放小圆：文案或锁定类名命中即标记 locked，调度层直接跳过往下走
+    // 只扫最近的书节点，别扫到整组容器，否则兄弟章节的「未开放」会连坐误跳过
+    const item = task.closest('.chapter_item, .posCatalog_select, li') || task.parentElement;
+    const scanTxt = [txt,
+      task.getAttribute('title') || '',
+      task.getAttribute('data-tips') || '',
+      (item ? (item.innerText || '') : ''),
+      (item ? (item.getAttribute('title') || '') : '')].join(' ');
+    const lockedWord = /未开放|不能查看|暂不能学/.test(scanTxt);
+    const parentCls = (item ? (item.className || '') : '').toString().toLowerCase();
+    const lockCls = /icon_lock|[-_\s]lock(ed)?\b|unopen|notopen|not_open|weikaifang|未开放/.test(cls + ' ' + parentCls);
+    if (lockedWord || lockCls) return {state: 'locked', hint: -2, marker: 'gray'};
     if (/catalog_jindu/.test(cls) || badge || /orangeNew|catalog_points_yi/.test(task.outerHTML || '')) {
       if (n !== null) return {state: 'orange', hint: n, marker: 'number'};
     }
@@ -1241,6 +1283,18 @@ JS_ONE_CHAPTER = r"""
     if (greenCheck || greenCircle) {
       return {state: 'green', hint: 0, marker: greenCheck ? 'check' : 'circle'};
     }
+    // 灰色未开放小圆：文案或锁定类名命中即标记 locked，调度层直接跳过往下走
+    // 只扫最近的书节点，别扫到整组容器，否则兄弟章节的「未开放」会连坐误跳过
+    const item = task.closest('.chapter_item, .posCatalog_select, li') || task.parentElement;
+    const scanTxt = [txt,
+      task.getAttribute('title') || '',
+      task.getAttribute('data-tips') || '',
+      (item ? (item.innerText || '') : ''),
+      (item ? (item.getAttribute('title') || '') : '')].join(' ');
+    const lockedWord = /未开放|不能查看|暂不能学/.test(scanTxt);
+    const parentCls = (item ? (item.className || '') : '').toString().toLowerCase();
+    const lockCls = /icon_lock|[-_\s]lock(ed)?\b|unopen|notopen|not_open|weikaifang|未开放/.test(cls + ' ' + parentCls);
+    if (lockedWord || lockCls) return {state: 'locked', hint: -2, marker: 'gray'};
     if (/catalog_jindu/.test(cls) || badge || /orangeNew|catalog_points_yi/.test(task.outerHTML || '')) {
       if (n !== null) return {state: 'orange', hint: n, marker: 'number'};
     }
@@ -1330,7 +1384,7 @@ def _js_chapters(frame):
 
 
 def _hint_from_item(el):
-    """从章节点读取小圆状态：0=绿色；>0=橙色待完成；-1=橙色 0；None=未知。"""
+    """从章节点读取小圆状态：0=绿色；>0=橙色待完成；-1=橙色 0；-2=灰色未开放；None=未知。"""
     try:
         task = el.query_selector(".catalog_state, .catalog_jindu, .catalog_task")
         if task is None:
@@ -1339,6 +1393,22 @@ def _hint_from_item(el):
         inner = (task.inner_text() or "").strip()
         if is_green_marker(cls, inner):
             return 0
+        # 灰色未开放小圆：优先看小圆自身/父节点的提示文案与锁定类名
+        scan = " ".join([inner, str(task.get_attribute("title") or ""),
+                         str(task.get_attribute("data-tips") or "")])
+        try:
+            parent = task.evaluate(
+                "e => { const it = e.closest('.chapter_item, .posCatalog_select, li')"
+                " || e.parentElement; return it ? ((it.innerText || '') + ' '"
+                " + (it.className || '')) : ''; }"
+            )
+            scan += " " + str(parent or "")
+        except Exception:  # noqa: BLE001
+            pass
+        blob = (cls + " " + scan).lower()
+        if any(w in scan for w in LOCKED_WORDS) or re.search(
+                r"icon_lock|[-_\s]lock(ed)?\b|unopen|notopen|not_open|weikaifang", blob, re.I):
+            return LOCKED_HINT
         # 绿色小圆未必带类名，补一次计算样式判断。
         try:
             if task.evaluate("""e => {

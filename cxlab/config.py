@@ -54,6 +54,9 @@ DEFAULTS = {
         "relogin_max_attempts": 3,       # 每次掉线的密码重登录尝试次数
         "max_relogin_per_hour": 6,       # 每小时最多自动重登录次数
         "relogin_cooldown_s": 600,       # 触发上限后的冷却时长（秒）
+        # ---- 多终端登录提示：等待后自动重连，不再永久暂停本轮 ----
+        "multi_terminal_reconnect_wait_s": 60,   # 提示后等待多少秒再重连
+        "multi_terminal_max_retry": 5,           # 本轮最多自动重连几次，超过才暂停本轮
         "net_retry_delays_s": [15, 30, 60, 120, 300],   # 断网重试退避序列（秒）
         "qr_wait_s": 300,                # 需人工扫码时的等待时长（秒）
     },
@@ -134,10 +137,12 @@ DEFAULTS = {
         "stop_on_risk": False,       # 遇风控页是否直接停止（False=暂停等人工）
         "retry_rounds": 2,           # 未完成的知识点在本轮末尾重试几轮（不会直接跳过）
         "confirm_before_run": False,  # 是否在执行前要求确认（交互选择模式下自动为 True）
-        # 出问题先唤起本机 WorkBuddy / TRAE 判断或维修，失败才转人工。
+        # 默认关闭：无界面 WorkBuddy/TRAE CLI 拿不到正在运行的浏览器会话，
+        # 实测多次唤起均无法修好（还常因 CLI 未登录直接退出），只会白等+堆请求文件。
+        # 需要时把 enabled 改 true，或用 command 接自己的修复脚本。
         "local_repair": {
-            "enabled": True,
-            "timeout_s": 180,
+            "enabled": False,
+            "timeout_s": 30,
             "workbuddy_exe": "",
             "trae_exe": "",
             # 可选命令模板，占位符 {request} / {response} / {prompt} 会被替换为实际路径。

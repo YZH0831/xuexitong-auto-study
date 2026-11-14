@@ -75,6 +75,7 @@ class Runner:
         self.relogin_count = 0
         self.relogin_failed = 0
         self.net_wait_count = 0
+        self._mt_recover_total = 0      # 本轮「多终端登录」自动重连累计次数
         # 课时选择状态
         self.lesson_mode = "all"        # all | index | per_course
         self.lesson_rule = ""           # index 模式下的表达式
@@ -280,10 +281,9 @@ class Runner:
         单端登录限制下，手机端登录会把电脑端顶下线，这里负责自愈。
         """
         cfg, log = self.cfg, self.log
-        # 平台弹过“多终端登录”提示后继续刷，可能顶掉用户当前会话或被判异常学习。
+        # 平台弹过「多终端登录」提示：等待 60 秒后自动重连，本轮继续（不再永久暂停）。
         if getattr(self.session, "multi_terminal_alert", False):
-            log.error("[会话] 已出现多终端登录提示 → 暂停本轮，不再继续")
-            return False
+            return self._recover_multi_terminal(context)
         if not bool(cfg.login.auto_relogin):
             return True
         now = time.time()
@@ -306,6 +306,62 @@ class Runner:
             return self._do_relogin(context)
         log.debug(f"[会话] 探测结果未知{tag}，继续执行")
         return True
+
+    def _recover_multi_terminal(self, context=""):
+        """平台弹出「多终端登录」提示：等待 60 秒后自动重连，然后继续本轮。
+
+        旧行为是永久暂停本轮。现在改为：等待 → 探测 → 掉线则自动重登录 →
+        重进课程页 → 清除告警；重连成功返回 True 让调用方继续本轮，
+        累计失败达到上限才返回 False（此时上层才会暂停本轮）。
+        """
+        cfg, log = self.cfg, self.log
+        _wait = getattr(cfg.login, "multi_terminal_reconnect_wait_s", 60)
+        _retry = getattr(cfg.login, "multi_terminal_max_retry", 5)
+        wait_s = 60.0 if _wait is None else float(_wait)
+        max_retry = 5 if _retry is None else max(1, int(_retry))
+        tag = f"（{context}）" if context else ""
+
+        for _ in range(max_retry):
+            if self._mt_recover_total >= max_retry:
+                break
+            self._mt_recover_total += 1
+            log.warning(f"[会话] 检测到多终端登录提示{tag} → 第 "
+                        f"{self._mt_recover_total}/{max_retry} 次自动重连："
+                        f"先等待 {wait_s:.0f} 秒让另一端会话稳定")
+            time.sleep(wait_s)
+            self.session.multi_terminal_alert = False
+            try:
+                state = self.session.probe_session()
+            except Exception as exc:  # noqa: BLE001
+                log.debug(f"[会话] 重连探测异常（按掉线处理）: {str(exc)[:70]}")
+                state = "logged_out"
+
+            if state == "offline":
+                if not self._wait_network(context):
+                    continue
+                try:
+                    state = self.session.probe_session()
+                except Exception:
+                    state = "logged_out"
+
+            if state == "logged_out":
+                log.warning(f"[会话] 电脑端已被顶下线{tag} → 自动重新登录")
+                if not self._do_relogin(context):
+                    log.warning(f"[会话] 第 {self._mt_recover_total} 次重连失败，"
+                                f"{wait_s:.0f} 秒后重试")
+                    continue
+            else:
+                # 会话仍有效：只重建课程上下文，不无故重新登录顶号
+                self._resume_context()
+
+            self.session.multi_terminal_alert = False
+            self._last_probe = time.time()
+            log.info("[会话] 自动重连成功 → 继续本轮（已完成的进度不会重做）")
+            return True
+
+        log.error(f"[会话] 自动重连 {self._mt_recover_total} 次仍未恢复 → "
+                  "暂停本轮，下次运行自动续跑")
+        return False
 
     def _wait_network(self, context=""):
         """网络断开：按退避序列等待恢复（不算作登录失败）。"""
@@ -460,21 +516,26 @@ class Runner:
                 return page
         return page
 
-    LOCK_MARKS = ("暂未开放", "尚未开放", "不能查看", "章节未开放")
+    # 「未开放」单独列出即可覆盖 暂未开放/尚未开放/章节未开放 等所有变体；
+    # 不用「未开始」等进度词，避免把正常待学章节误判成锁定而跳过。
+    LOCK_MARKS = ("未开放", "不能查看", "暂不能学")
 
     def _chapter_locked(self, page):
         """判断当前知识点是否因平台限制"未开放"（新版界面会提示开放时间）。"""
         for f in course_mod.all_frames(page):
             try:
-                txt = f.evaluate("() => (document.body ? document.body.innerText : '').slice(0, 1200)") or ""
+                txt = f.evaluate("() => (document.body ? document.body.innerText : '').slice(0, 4000)") or ""
             except Exception:  # noqa: BLE001
                 continue
             if any(k in txt for k in self.LOCK_MARKS):
                 return True
         return False
 
-    def _open_chapter(self, ch):
-        """点击章节树里的知识点进入学习页，返回 (页面, cards 帧)。"""
+    def _open_chapter(self, ch, need_cards=True):
+        """点击章节树里的知识点进入学习页，返回 (页面, cards 帧)。
+
+        need_cards=False 用于橙色0/灰色章节：它们没有内容可学，不需要反复等内容帧。
+        """
         # 锁定状态只属于本次打开尝试；任何提前返回都不能污染下一章节。
         self._last_locked = False
         log = self.log
@@ -504,6 +565,8 @@ class Runner:
                 self._last_locked = True
                 return page, None
         self.session.keep_alive()
+        if not need_cards:
+            return page, None
         page.wait_for_timeout(1000)
         cards = None
         for _ in range(8):
@@ -555,7 +618,7 @@ class Runner:
         circle = course_mod.discover_chapters(page, log, force=True)
         if circle:
             cmap = {c.id: c.hint for c in circle}
-            counts = {"green": 0, "orange": 0, "orange0": 0, "unknown": 0}
+            counts = {"green": 0, "orange": 0, "orange0": 0, "locked": 0, "unknown": 0}
             for c in chapters:
                 hint = cmap.get(c.id)
                 if hint is None:
@@ -566,11 +629,14 @@ class Runner:
                     counts["green"] += 1
                 elif hint == -1:
                     counts["orange0"] += 1
+                elif hint == course_mod.LOCKED_HINT:
+                    counts["locked"] += 1
                 else:
                     counts["orange"] += 1
             log.info(
                 f"小圆状态：绿色 {counts['green']} / 橙色待完成 {counts['orange']}"
                 f" / 橙色0 {counts['orange0']}"
+                + (f" / 灰色未开放 {counts['locked']}（跳过）" if counts["locked"] else "")
                 + (f" / 未知 {counts['unknown']}" if counts["unknown"] else "")
             )
 
@@ -593,7 +659,8 @@ class Runner:
     def _try_local_repair(self, ch, reason, note=""):
         """先唤起本机 WorkBuddy / TRAE 判断或维修；同一章节本 run 只试一次。"""
         lr = (self.cfg.safety.get("local_repair") or {}) if hasattr(self.cfg, "safety") else {}
-        if not bool(lr.get("enabled", True)):
+        # 默认关闭：唤起 WorkBuddy 从未修好过，失败应直接转人工，不空等也不堆请求文件。
+        if not bool(lr.get("enabled", False)):
             return False
         key = str(ch.id)
         if key in self._local_repair_attempted:
@@ -645,6 +712,10 @@ class Runner:
                     self.report.add(ch.title, "章节", "skipped", "已完成（树上绿色标记 / 接口 finish=total）")
                     log.info("  已完成，跳过")
                     continue
+                if ch.hint == course_mod.LOCKED_HINT:
+                    self.report.add(ch.title, "章节", "skipped", "灰色未开放小圆，按规则跳过往下走")
+                    log.info("  灰色未开放 → 跳过，继续下一章节")
+                    continue
                 if ch.hint == -1:
                     log.info("  橙色 0 → 按规则点进去，下滑找到「下一节」并点击")
                     status = self._advance_orange_zero(ch)
@@ -653,9 +724,17 @@ class Runner:
                         if self._try_local_repair(ch, "橙色0章节未点到下一节", "下滑后未找到或未点到「下一节」"):
                             status = self._advance_orange_zero(ch)
                         if status == "manual":
-                            self.report.add(ch.title, "橙色0推进", "manual", "未找到/未点到「下一节」")
-                            aborted = True
-                            break
+                            # 兜底：任何推不动的橙色0章节都按「往下跳」处理，绝不中断整轮
+                            self.report.add(ch.title, "橙色0推进", "skipped",
+                                            "推进失败，按规则跳过往下走")
+                            ch.hint = course_mod.LOCKED_HINT
+                            self.skipped_this_run.append(ch.title)
+                            continue
+                    if status == "skipped":
+                        # 进去后才发现是未开放：不门控、不停止，直接往下跳
+                        ch.hint = course_mod.LOCKED_HINT
+                        self.skipped_this_run.append(ch.title)
+                        continue
                     ch.hint = -1
                     continue
                 # 拟人化：进入章节前随机滚动页面
@@ -663,22 +742,25 @@ class Runner:
                 status = self.process_chapter(ch)
                 # 章节之间的最小间隔（带随机抖动）
                 self.humanizer.task_interval(int(cfg.safety.min_task_interval_s))
-                # manual/failed 先交给本机 WorkBuddy / TRAE 判断或维修，再重试一次。
+                # 默认直接转人工；只有显式开启 local_repair 才尝试修复并重试一次。
                 if status in ("manual", "failed"):
                     if self._try_local_repair(ch, "章节处理返回需人工/失败", self._last_chapter_note):
                         status = self.process_chapter(ch)
                         self.humanizer.task_interval(int(cfg.safety.min_task_interval_s))
 
-                # 用户指令门控：小圆绿色才允许下一个；橙色 0 走专用「点进去→下滑→下一节」分支。
-                # 例外：本次打开仍识别为“敬请期待/即将上线”的占位章节，可先跳过；
-                # --only 是用户显式只处理某一类任务，也不按整课门控。
+                # 处理完复核小圆：未变绿的记为需人工并在本轮末尾重试，但不中断整轮；
+                # 橙色 0 / 灰色未开放走专用跳过分支；--only 不做整课门控。
+                locked_skip = bool(status == "skipped" and getattr(self, "_last_locked", False))
                 placeholder_skip = bool(status == "skipped" and getattr(self, "_placeholder_skip", False))
-                if placeholder_skip:
+                if locked_skip:
+                    ch.hint = course_mod.LOCKED_HINT
+                    log.info("  章节未开放（灰色小圆）→ 跳过，继续下一章节")
+                elif placeholder_skip:
                     log.info("  占位章节按规则跳过（下次运行仍会重新探测是否能做）")
-                elif not getattr(self.args, "only", "") and ch.hint not in (0, -1):
+                elif not getattr(self.args, "only", "") and ch.hint not in (0, -1, course_mod.LOCKED_HINT):
                     state = ("橙色 0" if ch.hint == -1
                              else (f"橙色 {ch.hint}" if ch.hint else "状态未知"))
-                    # 门控失败同样先唤起本地助手；修好后重新读小圆，不许带病进入下一章。
+                    # 门控失败：默认直接转人工；只有显式开启 local_repair 才尝试修复。
                     if self._try_local_repair(ch, "小圆门控未通过", f"当前状态：{state}"):
                         fixed = self._verify_chapter(ch, rounds=1)
                         if isinstance(fixed, int):
@@ -689,21 +771,26 @@ class Runner:
                         if repaired:
                             log.info("  本地助手处理后已满足通行条件 → 继续")
                             continue
-                    log.error(
-                        f"  小圆门控未通过（当前 {state}）→ 不进入下一个任务；"
-                        "本地助手也未能处理，最后转人工"
+                    log.warning(
+                        f"  小圆门控未通过（当前 {state}）→ 记为需人工，继续后续章节"
                     )
                     self.report.add(ch.title, "小圆门控", "manual",
-                                    f"小圆未变绿且不是橙色 0（当前 {state}），本地助手未处理，已停止后续章节")
+                                    f"小圆未变绿且不是橙色 0（当前 {state}），本轮记为需人工并在末尾重试，不中断整轮")
                     if ch.title not in self.failed_this_run:
                         self.failed_this_run.append(ch.title)
                     if all(c.id != ch.id for c in self.failed_chapters):
                         self.failed_chapters.append(ch)
-                    aborted = True
-                    break
+                    continue
             # 平台拦截过提交的题目本 run 不再自动重提，避免连续交白卷。
-            pending = [c for c in self.failed_chapters
-                       if c.hint != 0 and str(c.id) not in self._submit_blocked_ids]
+            # 按 id 去重：同一章节可能同时被「处理失败」和「门控失败」登记，别重复重试。
+            seen_ids, pending = set(), []
+            for c in self.failed_chapters:
+                if (c.hint in (0, course_mod.LOCKED_HINT)
+                        or str(c.id) in self._submit_blocked_ids
+                        or c.id in seen_ids):
+                    continue
+                seen_ids.add(c.id)
+                pending.append(c)
             if pending and not aborted:
                 log.info(f"本轮结束：仍有 {len(pending)} 个知识点未完成"
                          f"（{ '、'.join(c.title[:18] for c in pending[:6]) }…）")
@@ -1035,18 +1122,30 @@ class Runner:
         self.popup.tick(page)
 
     def _advance_orange_zero(self, ch):
-        """橙色小圆数字为 0：点进去、下滑、直接点「下一节」推进。"""
+        """橙色小圆数字为 0：点进去、下滑、直接点「下一节」推进。
+
+        若实际是「灰色未开放」章节（树上小圆灰色、页面提示未开放），按用户规则
+        直接跳过往下走，不唤起本地助手、也不停止后续章节。
+        """
         log = self.log
-        page, _ = self._open_chapter(ch)
+        page, _ = self._open_chapter(ch, need_cards=False)
         if getattr(self, "_last_locked", False):
-            log.warning("  橙色0章节未开放 → 无法点「下一节」")
-            ch.hint = 1
-            return "manual"
+            log.info("  该章节未开放（灰色小圆）→ 跳过，继续下一章节")
+            ch.hint = course_mod.LOCKED_HINT
+            self.report.add(ch.title, f"[未开放] {ch.title[:50]}", "skipped",
+                            "灰色未开放小圆，按规则跳过")
+            return "skipped"
         self._scroll_to_bottom_for_next(page)
         if not self._click_next_block(page, marks=("下一节", "下一章")):
-            log.warning("  橙色0章节下滑后仍未点到「下一节」→ 停止，不继续后续章节")
-            ch.hint = 1
-            return "manual"
+            # 橙色 0 / 灰色小圆本身没有任务点，推不动就按用户规则「往下跳」：
+            # 记一笔跳过并继续后续章节，不因单个章节停掉整轮、也不唤起本地助手。
+            locked = self._chapter_locked(page)
+            why = "页面提示未开放" if locked else "灰色/无任务点章节，没有「下一节」入口"
+            log.info(f"  橙色0章节推不动（{why}）→ 跳过，继续后续章节")
+            ch.hint = course_mod.LOCKED_HINT
+            self.report.add(ch.title, "橙色0推进", "skipped",
+                            f"{why}，按规则跳过往下走")
+            return "skipped"
         page.wait_for_timeout(1200)
         self.popup.tick(page)
         self.report.add(ch.title, "橙色0推进", "done", "已点进去、下滑并点击「下一节」")
@@ -1451,6 +1550,7 @@ class Runner:
         page, cards = self._open_chapter(ch)
         if getattr(self, "_last_locked", False):
             self._last_chapter_note = "章节未开放（平台限制）"
+            ch.hint = course_mod.LOCKED_HINT
             log.info("  结果: skipped | 章节未开放，跳过（非错误）")
             self.report.add(ch.title, f"[未开放] {ch.title[:50]}", "skipped", "章节未开放（平台限制）")
             self.skipped_this_run.append(ch.title)
@@ -1714,7 +1814,12 @@ class Runner:
                     note += "；已尝试提交/下一节推进"
                     hint = self._verify_chapter(ch)
 
-        if hint is not None:
+        if hint == course_mod.LOCKED_HINT:
+            # 处理过程中章节被平台关闭/未开放：按跳过处理，别当成失败或 -2 个未完成
+            ch.hint = course_mod.LOCKED_HINT
+            status = "skipped"
+            note += "；小圆显示未开放，按规则跳过"
+        elif hint is not None:
             if hint == 0:
                 note += "；复核：平台已标记完成"
                 if status == "failed":
@@ -2201,6 +2306,8 @@ class Runner:
                     return 0
                 if dom == -1:
                     return -1
+                if dom == course_mod.LOCKED_HINT:
+                    return course_mod.LOCKED_HINT
                 last_hint = max(int(dom), 0)
             # 2) 平台接口兜底（不覆盖小圆已给出的绿色/橙色 0）
             if time.time() >= next_api:

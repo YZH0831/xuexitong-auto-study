@@ -386,7 +386,7 @@ runner10.popup = type("P", (), {"tick": lambda self, page=None: None})()
 calls10 = {"open": 0, "scroll": 0, "click": 0, "marks": None}
 
 
-def _open10(ch):
+def _open10(ch, need_cards=True):
     calls10["open"] += 1
     return _FakeWaitPage(), None
 
@@ -409,12 +409,12 @@ assert runner10._advance_orange_zero(ch10) == "done"
 assert calls10 == {"open": 1, "scroll": 1, "click": 1,
                    "marks": ("下一节", "下一章")}, calls10
 
-# 没点到下一节时，不再直接进入后续章节
+# 没点到下一节时按「往下跳」处理：记 skipped 后继续后续章节，不再停整轮
 runner10._click_next_block = lambda page, marks=None: False
 ch10b = course_mod.Chapter("zero2", "橙色0失败", None, -1)
-assert runner10._advance_orange_zero(ch10b) == "manual"
-assert ch10b.hint == 1
-print("[10] 橙色0推进 OK（点进去→下滑→点下一节；没点到则停止）")
+assert runner10._advance_orange_zero(ch10b) == "skipped"
+assert ch10b.hint == course_mod.LOCKED_HINT
+print("[10] 橙色0推进 OK（有「下一节」就点；没有则跳过往下走，不停止整轮）")
 
 # ---------------- 11) 两类绿色标识 + 本地助手保底 ----------------
 assert course_mod.is_green_marker("catalog_state icon_yiwanc", "") is True   # 绿色勾
@@ -446,6 +446,9 @@ with tempfile.TemporaryDirectory() as td:
 args11 = argparse.Namespace(select="", pick=False, list_courses=False, dry_run=True,
                             only="", headless=True, course="", config="config.yaml")
 runner11 = Runner(Config(load_config(str(CFG_PATH))), log, args11)
+# 默认配置应关闭「唤起 WorkBuddy 保底」；协议自测里显式打开
+assert runner11.cfg.safety["local_repair"]["enabled"] is False, "local_repair 默认必须关闭"
+runner11.cfg.safety["local_repair"]["enabled"] = True
 runner11.report = type("R", (), {"add": lambda self, *a, **k: None})()
 repair_calls = {"n": 0, "result": True}
 _orig_request_repair = local_repair_mod.request_repair
@@ -519,9 +522,9 @@ def _process_always_manual(ch):
 runner12b.process_chapter = _process_always_manual
 ch12b = course_mod.Chapter("manual-final", "最终人工", None, 1)
 runner12b._run_rounds([ch12b])
-assert state12b == {"process": 1}, state12b
-assert [c.id for c in runner12b.failed_chapters] == ["manual-final"]
-print("[12] 本地助手保底调度 OK（修好→重试当前章节；失败→停止并转人工）")
+assert state12b["process"] >= 1, state12b  # 第1轮 + 末尾重试轮
+assert {c.id for c in runner12b.failed_chapters} == {"manual-final"}
+print("[12] 本地助手保底调度 OK（修好→重试当前章节；失败→记为需人工、末尾重试，不中断整轮）")
 
 # ---------------- 13) 直播 1x 重播必须重新点 liveHref，并透传 force_rate ----------------
 class _LivePage:
@@ -785,14 +788,23 @@ class _Dialog17:
 browser17 = BrowserSession.__new__(BrowserSession)
 browser17.log = log
 browser17.multi_terminal_alert = False
+browser17.multi_terminal_at = 0.0
 browser17._on_dialog(_Dialog17())
 assert browser17.multi_terminal_alert is True
+assert browser17.multi_terminal_at > 0
 runner17 = Runner(Config(load_config(str(CFG_PATH))), log, argparse.Namespace(
     select="", pick=False, list_courses=False, dry_run=True,
     only="", headless=True, course="", config="config.yaml"))
-runner17.session = type("S", (), {"multi_terminal_alert": True})()
-assert runner17._ensure_session("测试") is False
-print("[17] 保底/会话保护 OK（CLI 使用 lite-wb 入口；多终端登录提示立即暂停）")
+runner17.cfg["login"]["multi_terminal_reconnect_wait_s"] = 0
+runner17.cfg["login"]["multi_terminal_max_retry"] = 2
+runner17.course = None
+runner17.session = type("S", (), {
+    "multi_terminal_alert": True,
+    "probe_session": lambda self, *a, **k: "ok",
+})()
+assert runner17._ensure_session("测试") is True
+assert runner17.session.multi_terminal_alert is False
+print("[17] 保底/会话保护 OK（CLI 使用 lite-wb 入口；多终端登录提示 → 等待后自动重连继续本轮）")
 
 # ---------------- 18) 大任务点内的小任务点：mArg.attachments / jobid / 时长校验 ----------------
 html18 = '''mArg = "";

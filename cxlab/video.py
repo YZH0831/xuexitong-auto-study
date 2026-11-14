@@ -521,9 +521,19 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
     alive_every = 45.0
 
     while True:
-        # 平台弹过“多终端登录”后立即停止，不再把当前视频播完。
+        # 平台弹出「多终端登录」提示：交给 keepalive 等 60 秒自动重连；
+        # 重连成功后结束当前视频（该知识点会进入本轮重试队列），本轮继续，不再整轮暂停。
         if getattr(session, "multi_terminal_alert", False):
-            return "manual", "检测到多终端登录提示，已暂停本轮"
+            log.warning("[会话] 播放中出现多终端登录提示 → 等待 60 秒自动重连")
+            recovered = False
+            if keepalive is not None:
+                try:
+                    recovered = bool(keepalive("视频播放"))
+                except Exception as exc:  # noqa: BLE001
+                    log.debug(f"keepalive 回调异常（忽略）: {str(exc)[:60]}")
+            if recovered:
+                return "manual", "多终端登录提示，已自动重连，本知识点稍后重试"
+            return "manual", "多终端登录提示，自动重连未成功"
         # 会话健康检查：掉线/断网时由 runner 负责自动重登录或等待恢复
         if keepalive is not None:
             try:

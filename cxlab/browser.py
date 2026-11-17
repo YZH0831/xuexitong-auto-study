@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """浏览器会话管理：启动 Edge/Chrome、登录态持久化、新标签页捕获、会话保活。"""
+import re
 import time
 from pathlib import Path
 
@@ -19,6 +20,11 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 KEEPALIVE_URL = "https://i.chaoxing.com/"
 KEEPALIVE_INTERVAL_S = 240
 
+# 平台多终端提示原文：「您的账号于22:00在一台谷歌内核浏览器设备登入章节页面。多终端登录可能会被判定异常学习。」
+# 这条提示只是"有设备登录过"的通知，**并不等于本机会话已被顶下线**：
+# 本程序自己用的就是 Edge/Chrome（谷歌内核），自身的重新登录/拉取课程也会触发它。
+MT_NOTICE_RE = re.compile(r"于(\d{1,2}:\d{2})在一台(.+?)登入")
+
 
 class BrowserSession:
     def __init__(self, cfg, log):
@@ -27,6 +33,8 @@ class BrowserSession:
         self._last_keepalive = 0.0
         self.multi_terminal_alert = False
         self.multi_terminal_at = 0.0        # 最近一次多终端登录提示的时间
+        self.multi_terminal_detail = ""     # 提示原文里的「时间/设备」摘要，便于判定是否自己触发
+        self.multi_terminal_kicked = False  # 最近一次核验的结论：是否真的被顶号
         self.pw = sync_playwright().start()
         self.browser = self._launch()
         storage = Path(cfg.state_dir) / "storage_state.json"
@@ -93,8 +101,12 @@ class BrowserSession:
             if any(k in msg for k in ("多终端登录", "谷歌内核浏览器设备登入")):
                 self.multi_terminal_alert = True
                 self.multi_terminal_at = time.time()
-                self.log.error("[多终端登录] 平台提示账号在另一浏览器设备登入；"
-                               "将等待 60 秒后自动重连并继续本轮")
+                m = MT_NOTICE_RE.search(msg)
+                self.multi_terminal_detail = (f"{m.group(1)} 于 {m.group(2)}" if m else msg[:60])
+                # 只是"有设备登录过"的通知，本机会话是否被顶号以 probe_session 探测为准，
+                # 不在此处直接断定掉线（自身重新登录同样会弹出这条）。
+                self.log.warning(f"[多终端提示] {self.multi_terminal_detail}；"
+                                 "是否真被顶号以会话探测为准，将立即核验")
             dialog.accept()
         except Exception:  # noqa: BLE001
             pass

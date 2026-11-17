@@ -281,9 +281,11 @@ class Runner:
         单端登录限制下，手机端登录会把电脑端顶下线，这里负责自愈。
         """
         cfg, log = self.cfg, self.log
-        # 平台弹过「多终端登录」提示：等待 60 秒后自动重连，本轮继续（不再永久暂停）。
+        # 平台弹过「多终端登录」提示：这条只是"有设备登录"的通知，本程序自身重新登录
+        # 同样会触发（其浏览器也是谷歌内核）。因此先做一次权威会话探测再下结论，
+        # 不再一见提示就等 60 秒 / 重登（那既浪费时间，又因二次登录反过来制造真顶号）。
         if getattr(self.session, "multi_terminal_alert", False):
-            return self._recover_multi_terminal(context)
+            return self._verify_multi_terminal(context)
         if not bool(cfg.login.auto_relogin):
             return True
         now = time.time()
@@ -306,6 +308,48 @@ class Runner:
             return self._do_relogin(context)
         log.debug(f"[会话] 探测结果未知{tag}，继续执行")
         return True
+
+    def _verify_multi_terminal(self, context=""):
+        """收到「多终端登录」提示后，用一次权威探测判定到底有没有被顶号。
+
+        平台的这条 alert 只是"有设备登入"的通知，并不代表本会话已失效：
+        - 本程序自身重新登录（浏览器同为谷歌内核）就会触发它；
+        - 手机端登录把电脑顶下线时，会话才会真的失效。
+        因此以 probe_session 的结果为准，给出明确结论，避免"分不清"：
+          ok        → 未被顶号（多为自身登录/他人登录但会话仍有效），清标记继续跑，不重登、不空等
+          logged_out→ 确实被顶号 → 走自动重新登录
+          offline   → 网络问题，与顶号无关 → 走断网退避
+        """
+        cfg, log = self.cfg, self.log
+        tag = f"（{context}）" if context else ""
+        detail = getattr(self.session, "multi_terminal_detail", "") or ""
+        # 先把标记消费掉；后续若探测到真掉线，_do_relogin 会自行处理会话。
+        self.session.multi_terminal_alert = False
+        self.session.multi_terminal_kicked = False
+        try:
+            state = self.session.probe_session()
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"[顶号判定] 探测异常（按掉线处理）: {str(exc)[:70]}")
+            state = "logged_out"
+
+        if state == "ok":
+            self.session.multi_terminal_kicked = False
+            log.info(f"[顶号判定] 结论=未被顶号{tag}"
+                     + (f"（平台提示：{detail}）" if detail else "")
+                     + "；本机会话探测正常 → 继续任务，不重登、不空等")
+            self._last_probe = time.time()
+            return True
+        if state == "offline":
+            log.warning(f"[顶号判定] 网络暂不可达{tag}，与顶号无关 → 等待网络恢复")
+            return self._wait_network(context)
+        # logged_out / unknown → 按真掉线处理
+        self.session.multi_terminal_kicked = True
+        log.warning(f"[顶号判定] 结论=确实被顶号{tag}"
+                    + (f"（平台提示：{detail}）" if detail else "")
+                    + "；本机会话已失效 → 自动重新登录")
+        ok = self._do_relogin(context)
+        self._last_probe = time.time()
+        return ok
 
     def _recover_multi_terminal(self, context=""):
         """平台弹出「多终端登录」提示：等待 60 秒后自动重连，然后继续本轮。

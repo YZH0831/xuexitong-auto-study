@@ -521,19 +521,26 @@ def play_video(session, cfg, log, page, popup, tp, force_rate=None, keepalive=No
     alive_every = 45.0
 
     while True:
-        # 平台弹出「多终端登录」提示：交给 keepalive 等 60 秒自动重连；
-        # 重连成功后结束当前视频（该知识点会进入本轮重试队列），本轮继续，不再整轮暂停。
+        # 平台弹出「多终端登录」提示：这条只是"有设备登入"的通知，本程序自身重新登录
+        # 也会触发。交给 keepalive（_ensure_session）做权威探测并给出结论：
+        #   - 未被顶号（会话探测正常）→ 继续播放当前视频，不中断、不空等、不重登；
+        #   - 确实被顶号 → 自动重登成功后结束本视频，知识点进入本轮重试队列。
         if getattr(session, "multi_terminal_alert", False):
-            log.warning("[会话] 播放中出现多终端登录提示 → 等待 60 秒自动重连")
+            log.warning("[会话] 播放中出现多终端登录提示 → 立即核验会话是否被顶号")
             recovered = False
             if keepalive is not None:
                 try:
                     recovered = bool(keepalive("视频播放"))
                 except Exception as exc:  # noqa: BLE001
                     log.debug(f"keepalive 回调异常（忽略）: {str(exc)[:60]}")
-            if recovered:
-                return "manual", "多终端登录提示，已自动重连，本知识点稍后重试"
-            return "manual", "多终端登录提示，自动重连未成功"
+            if getattr(session, "multi_terminal_kicked", False):
+                # 探测确认真的被顶号；重登成功则本视频稍后重试，失败则如实上报
+                if recovered:
+                    return "manual", "确认被顶号，已自动重连，本知识点稍后重试"
+                return "manual", "确认被顶号，自动重连未成功"
+            # 未被顶号（含探测正常/keepalive 缺席）：会话仍可用，继续播放
+            log.info("[会话] 核验结论=未被顶号，会话正常 → 继续播放当前视频")
+            session.multi_terminal_alert = False
         # 会话健康检查：掉线/断网时由 runner 负责自动重登录或等待恢复
         if keepalive is not None:
             try:

@@ -9,6 +9,10 @@
 > 带**字体混淆解码**、**选项顺序对齐**、**题库→大模型→双源搜题→兜底推理**四级答题链路，
 > 以及**环境自检 / 密钥图形设置 / 密钥扫描**等工程化配套。
 
+> **EN** · Automate Chaoxing / Xuexitong (超星学习通) courses with a real browser (Playwright + Edge):
+> video, audio, documents and quizzes, with encrypted-font decoding, option-order alignment,
+> a 4-tier answer pipeline, auto-relogin and anti-detection. Windows/macOS/Linux, GPL-3.0.
+
 当前版本：**v1.1.2**（2026-11-17）｜平台：Windows 10/11（另有 macOS/Linux 的 `.sh` 脚本）｜许可：GPL-3.0
 GitHub 仓库：https://github.com/YZH0831/xuexitong-auto-study
 

@@ -7,6 +7,7 @@
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -87,5 +88,25 @@ b._on_dialog(_Dialog())
 assert b.multi_terminal_alert is True
 assert "22:00" in b.multi_terminal_detail and "谷歌内核浏览器" in b.multi_terminal_detail, b.multi_terminal_detail
 print(f"[4] 弹窗解析出 时间/设备：{b.multi_terminal_detail}  OK")
+
+# 5) keepalive 守护：虚惊(未被顶号)不冷却，真被顶号才冷却
+import tempfile  # noqa: E402
+import tools.keepalive as ka  # noqa: E402
+
+def check_broken(name, tail_lines, expected):
+    with tempfile.TemporaryDirectory() as td:
+        ka.LOG_DIR = Path(td)
+        (ka.LOG_DIR / "run_test.log").write_text("\n".join(tail_lines), encoding="utf-8")
+        got = ka.session_broken(time.time() - 10)
+        assert got == expected, f"{name}: 期望 {expected}，实际 {got}"
+        print(f"[5.{name}] session_broken={got}  OK")
+
+check_broken("虚惊不冷却", [
+    "18:46:42 [页面对话框] alert: 您的账号于22:00在一台谷歌内核浏览器设备登入。多终端登录可能会被判定异常学习。",
+    "18:46:43 [顶号判定] 结论=未被顶号；本机会话探测正常 → 继续任务",
+], False)
+check_broken("真顶号冷却", [
+    "18:46:43 [顶号判定] 结论=确实被顶号；本机会话已失效 → 自动重新登录",
+], True)
 
 print("\n[OK] 顶号判定回归测试全部通过")

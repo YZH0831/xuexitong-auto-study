@@ -3,13 +3,13 @@
 ![CI](https://github.com/YZH0831/xuexitong-auto-study/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
-![Version](https://img.shields.io/badge/version-v1.1.1-orange)
+![Version](https://img.shields.io/badge/version-v1.1.2-orange)
 
 > 用 **真实浏览器**（Playwright 驱动本机 Edge）完成学习通/超星课程的视频、音频、课件、章节测验，
 > 带**字体混淆解码**、**选项顺序对齐**、**题库→大模型→双源搜题→兜底推理**四级答题链路，
 > 以及**环境自检 / 密钥图形设置 / 密钥扫描**等工程化配套。
 
-当前版本：**v1.1.1**（2026-11-14）｜平台：Windows 10/11（另有 macOS/Linux 的 `.sh` 脚本）｜许可：GPL-3.0
+当前版本：**v1.1.2**（2026-11-17）｜平台：Windows 10/11（另有 macOS/Linux 的 `.sh` 脚本）｜许可：GPL-3.0
 GitHub 仓库：https://github.com/YZH0831/xuexitong-auto-study
 
 ---
@@ -147,7 +147,7 @@ fonttools>=4.60       # 解析加密字体（题面还原）
 
 ```
 ============================================================
-               学习通自动化助手  v1.1.1
+               学习通自动化助手  v1.1.2
 ============================================================
    大模型答题：[已启用] deepseek-flash  sk-e98***2099
 ------------------------------------------------------------

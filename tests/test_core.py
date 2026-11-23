@@ -16,8 +16,13 @@ from cxlab.report import Report  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 tmp = Path(tempfile.mkdtemp())
 
+# data/answers.json 是个人题库，已移出 Git（.gitignore），CI 里不存在。
+# 测试只用仓库内的脱敏夹具，避免测试结果依赖本地私有数据。
+FIXTURE_ANSWERS = Path(__file__).resolve().parent / "fixtures" / "answers_fixture.json"
+assert FIXTURE_ANSWERS.exists(), f"缺少测试题库夹具: {FIXTURE_ANSWERS}"
+
 # ---- 题库 ----
-bank = QuestionBank(str(ROOT / "data/answers.json"), str(tmp / "pool.json"), log)
+bank = QuestionBank(str(FIXTURE_ANSWERS), str(tmp / "pool.json"), log)
 print("加载题条目数:", bank.size)
 assert bank.size >= 1, "题库未加载"
 
@@ -39,12 +44,12 @@ assert bank.lookup("完全不相关的题目xyz") is None
 bank.record("实验室发生火灾应首先", "切断电源", "single")
 bank.save_pool()
 assert (tmp / "pool.json").exists()
-bank2 = QuestionBank(str(ROOT / "data/answers.json"), str(tmp / "pool.json"), log)
+bank2 = QuestionBank(str(FIXTURE_ANSWERS), str(tmp / "pool.json"), log)
 print("沉淀后可查:", bank2.lookup("实验室发生火灾应首先"))
 assert bank2.lookup("实验室发生火灾应首先")["answer"] == "切断电源"
 
 # 防污染：联网(未验证)答案不能覆盖已验证答案；已验证可以覆盖未验证
-bank3 = QuestionBank(str(ROOT / "data/answers.json"), str(tmp / "pool3.json"), log)
+bank3 = QuestionBank(str(FIXTURE_ANSWERS), str(tmp / "pool3.json"), log)
 bank3.record("某题", "B", "single", source="online")
 assert bank3.lookup("某题")["verified"] is False
 bank3.record("某题", "A", "single", source="quiz_result")

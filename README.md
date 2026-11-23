@@ -3,17 +3,20 @@
 ![CI](https://github.com/YZH0831/xuexitong-auto-study/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
-![Version](https://img.shields.io/badge/version-v1.1.2-orange)
+![Version](https://img.shields.io/badge/version-v1.1.3-orange)
 
 > 用 **真实浏览器**（Playwright 驱动本机 Edge）完成学习通/超星课程的视频、音频、课件、章节测验，
 > 带**字体混淆解码**、**选项顺序对齐**、**题库→大模型→双源搜题→兜底推理**四级答题链路，
 > 以及**环境自检 / 密钥图形设置 / 密钥扫描**等工程化配套。
+> 2026-11-23 安全审计修复：提交成功必须有请求或页面变化证据；结果页只认明确正确标记，
+> 同等级新证据可纠正旧答案；多选必须完整核对；人工作答超时不再谎称完成。
 
 > **EN** · Automate Chaoxing / Xuexitong (超星学习通) courses with a real browser (Playwright + Edge):
 > video, audio, documents and quizzes, with encrypted-font decoding, option-order alignment,
-> a 4-tier answer pipeline, auto-relogin and anti-detection. Windows/macOS/Linux, GPL-3.0.
+> a 4-tier answer pipeline, auto-relogin and anti-detection. Hardened submission evidence and
+> answer-bank integrity. Windows/macOS/Linux, GPL-3.0.
 
-当前版本：**v1.1.2**（2026-11-17）｜平台：Windows 10/11（另有 macOS/Linux 的 `.sh` 脚本）｜许可：GPL-3.0
+当前版本：**v1.1.3**（2026-11-23）｜平台：Windows 10/11（另有 macOS/Linux 的 `.sh` 脚本）｜许可：GPL-3.0
 GitHub 仓库：https://github.com/YZH0831/xuexitong-auto-study
 
 ---
@@ -42,8 +45,8 @@ GitHub 仓库：https://github.com/YZH0831/xuexitong-auto-study
 | 视频 | 探测倍速能力（最高 3x）、按完成线（如 90%）停止、进度轮询、卡顿自愈、**批注自动继续**、**视频弹题大模型自动作答（无模型则转本地助手/人工）**、播完后接口复核 |
 | 音频 | 音频导学走同一套播放器逻辑（video.js + `modules/audio`），按真实时长播完 |
 | 文档 | 翻页/滚动浏览，单页正文自动识别（不会傻等 15 分钟） |
-| 章节测验 | 加密字体解码 → 题库 → 大模型 → 双源搜题 → 兜底推理；单选/多选/判断/填空分别处理；提交后回读结果沉淀题库 |
-| 答题可靠性 | 选项文本对齐、双源交叉核对与冲突仲裁、多选题补全、判断题必答、**任何情况不留空**（留空会触发平台"还有 X 道题未作答"拦截） |
+| 章节测验 | 加密字体解码 → 题库 → 大模型 → 双源搜题 → 兜底推理；单选/多选/判断/填空分别处理；提交后仅在读到分数时按明确正确标记回读沉淀题库 |
+| 答题可靠性 | 选项文本对齐、双源交叉核对与冲突仲裁、多选题补全与完整集合核对、判断题必答、**任何情况不留空**（留空会触发平台"还有 X 道题未作答"拦截）；人工超时不再误报完成 |
 | 反风控 | 贝塞尔鼠标轨迹、随机延时、随机滚动、长暂停、频率限制、遇风控页可暂停等人工；检测到“多终端登录”提示立即暂停本轮，避免继续顶号 |
 | 可观测 | 逐任务点日志、完成报告（Markdown + JSON）、日志自动脱敏（Key/手机号） |
 | 工程化 | 环境自检 `doctor`、密钥图形设置、提交前密钥扫描、14 组离线测试、一键打包、本地助手保底 |

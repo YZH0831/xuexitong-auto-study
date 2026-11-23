@@ -177,7 +177,10 @@ def _parse_question(el, log=None):
     except Exception:  # noqa: BLE001
         radios = checks = texts = []
 
-    if "判断" in text:
+    if "判断" in text and len(options) <= 2:
+        # ★ 防误判：题干含「判断」字样（如"下列判断正确的是"）的 3+ 选项题
+        #   是单选/多选，不是判断题；真判断题选项必然 ≤2，
+        #   选项文本形态的真判断题由下方 _is_judge 兜底。
         qtype = "judge"
     elif "多选" in text or "多项" in text:
         qtype = "multi"
@@ -286,7 +289,8 @@ def _parse_question_legacy(el, log=None):
     opt_cls = " ".join((o["el"].get_attribute("class") or "") for o in options[:3]) if options else ""
     if "num_option_dx" in opt_cls or "多选" in text or "多项" in text:
         qtype = "multi"
-    elif "判断" in text:
+    elif "判断" in text and len(options) <= 2:
+        # ★ 同 _parse_question：防"下列判断正确的是"类单选题被误判成判断题
         qtype = "judge"
     elif "单选" in text or "单项" in text:
         qtype = "single"
@@ -754,6 +758,45 @@ def submit_quiz(page, log, humanizer=None):
     return False
 
 
+def _verify_feedback_value(v, q):
+    """校验结果页回读的一条"答案"确实属于本题（防把"我的答案"等脏文本入库）。
+
+    通过则返回规范化后的答案文本，否则 None。三个通道：
+    ① 纯选项字母（A-H 在选项范围内 / 判断题 TR、FA）；
+    ② 能对上本题某个选项的正文（与 fill_answer 同标准的归一化匹配，返回选项正文）；
+    ③ 判断词（对/错/√/× 等）能对上选项的判断语义。
+    """
+    t = (v or "").strip()
+    if not t or len(t) >= 100:
+        return None
+    if q.options:
+        la = t.upper()
+        if len(t) == 1 and "A" <= la <= "H":
+            idx = ord(la) - 65
+            if 0 <= idx < len(q.options):
+                return la
+        if la in ("TR", "FA"):
+            for o in q.options:
+                if (o.get("letter") or "").upper() == la:
+                    return la
+        norm_v = _norm(t)
+        for o in q.options:
+            norm_o = _norm(o.get("text") or "")
+            if not norm_o:
+                continue
+            if (norm_v == norm_o or norm_v in norm_o
+                    or (len(norm_o) >= 4 and norm_o in norm_v)):
+                return (o.get("text") or t).strip()
+        ji = {"TR": 0, "FA": 1}.get(la)
+        if ji is None:
+            ji = judge_index(t)
+        if ji is not None:
+            for o in q.options:
+                if judge_index(o.get("text") or "") == ji:
+                    return t
+    return None
+
+
 def read_result(page, questions, bank, log):
     text = ""
     for frame in _containers(page):
@@ -770,23 +813,35 @@ def read_result(page, questions, bank, log):
                 break
             except ValueError:
                 continue
-    # 回读正确答案沉淀题库
+    # 回读正确答案沉淀题库。
+    # ★ 2026-11-23 防污染：quiz_result 是最高可信度（RANK=5），一旦写入，
+    #   任何低等级证据都覆盖不了（answers.py 只允许高等级覆盖低等级），
+    #   等于把错误答案永久锁死。旧实现的问题：
+    #   a) 选择器含 .answer —— 结果页"我的答案"布局类同样命中，用户自己
+    #      填错的文本会以最高可信度入库；
+    #   b) 回读值不经任何归属校验 —— 解析段落/整块反馈文本直接拼接。
+    #   现在每条值必须通过 _verify_feedback_value（确实是本题的选项/
+    #   选项字母/判断词）才沉淀；无选项的填空题无法验证 → 不沉淀
+    #   （宁缺勿污染，题库干净比数量重要）。
     recorded = 0
     for q in questions:
+        if not q.options:
+            continue
         try:
-            rights = q.element.query_selector_all('[class*="right"], [class*="correct"], [class*="true"], .answer')
+            rights = q.element.query_selector_all(
+                '[class*="right"], [class*="correct"], [class*="true"]')
         except Exception:  # noqa: BLE001
             continue
         values = []
         for r in rights:
-            t = _visible_text(r)
-            if t and len(t) < 100:
-                values.append(t)
+            got = _verify_feedback_value(_visible_text(r), q)
+            if got and got not in values:
+                values.append(got)
         if values:
             bank.record(q.stem, "|".join(values[:6]), q.type)
             recorded += 1
     if recorded:
-        log.info(f"  已从结果页沉淀 {recorded} 道题到题库")
+        log.info(f"  已从结果页沉淀 {recorded} 道题到题库（已逐条校验归属）")
     return score
 
 
@@ -976,7 +1031,8 @@ def run_quiz(session, cfg, log, page, popup, bank, online=None, humanizer=None):
 
         if answer is None and llm_solver.enabled:
             la, conf, reason = llm_solver.solve(q.stem, q.options, q.type)
-            min_conf = float(cfg.quiz.get("llm", {}).get("min_confidence", 0.55) or 0)
+            llm_cfg = cfg.quiz.get("llm", {}) or {}
+            min_conf = float(llm_cfg.get("min_confidence", 0.55) or 0)
             if la and conf < min_conf:
                 log.warning(f"  大模型置信度 {conf:.2f} < 门槛 {min_conf:.2f} → 放弃该题（宁缺勿错）")
                 la = None
@@ -986,14 +1042,41 @@ def run_quiz(session, cfg, log, page, popup, bank, online=None, humanizer=None):
                 source = f"大模型(置信{conf:.1f})"
                 log.info(f"  大模型作答：{q.stem[:26]}… → {la}"
                          + (f"（{reason}）" if reason else ""))
-                if cfg.quiz.get("llm", {}).get("cross_check_with_search") and online is not None:
+                # 置信度校准：模型自报 conf 普遍虚高，单靠 min_confidence 门槛拦不住。
+                # 触发复核：显式全量复核(cross_check_with_search)，或自置信度低于
+                # 灰区阈值 verify_below（0=关闭）。用独立证据给虚高的自信"称重"。
+                from .online_answer import same_answer
+                verify_all = bool(llm_cfg.get("cross_check_with_search"))
+                verify_below = float(llm_cfg.get("verify_below", 0) or 0)
+                need_verify = online is not None and (
+                    verify_all or (verify_below > 0 and conf < verify_below))
+                if need_verify:
                     cres = online.search_cross(session.context, q.stem, q.options, q.type)
                     sa = cres.get("answer")
                     if sa:
-                        same = str(sa).replace("、", "")[:8].upper() == str(la)[:8].upper()
-                        log.info(f"  搜索交叉验证：{sa} → {'一致 ✔' if same else '不一致 ⚠'}")
-                        if not same:
-                            conflicts.append(f"{q.stem[:20]}：大模型={la} / 搜索={sa}（采信大模型）")
+                        same = same_answer(str(sa), str(la), q.options)
+                        log.info(f"  大模型交叉复核：搜索={sa} / 模型={la} → "
+                                 + ("一致 ✔" if same else "不一致 ⚠"))
+                        if same:
+                            # 互相印证 → 升级为可信来源，入库后不会被弱证据推翻
+                            rec_source = "llm_verified"
+                            source = f"大模型+搜索互证(置信{conf:.1f})"
+                        else:
+                            # 冲突仲裁：不再无脑采信模型。搜索双源一致的证据强于单模型；
+                            # 模型高置信但搜索未达双源一致时保留模型；否则采信搜索的明确答案。
+                            if cres.get("agree"):
+                                adopted, why = sa, "搜索双源一致，证据强于单模型"
+                            elif conf >= 0.85:
+                                adopted, why = la, f"模型置信{conf:.2f}较高，搜索未达双源一致"
+                            else:
+                                adopted, why = sa, f"模型置信仅{conf:.2f}，采信搜索明确答案"
+                            conflicts.append(f"{q.stem[:20]}：大模型={la} / 搜索={sa}"
+                                             f"（冲突，{why}）")
+                            log.warning(f"  → 大模型与搜索冲突，采信 {adopted}：{why}")
+                            if adopted != la:
+                                answer = sa
+                                rec_source = "cross_checked" if cres.get("agree") else "online_conflict"
+                                source = "搜索复核(覆盖大模型)"
         if answer is None and online is not None:
             use_cross = (bool(cfg.quiz.online_search.get("cross_check", True))
                          and hasattr(online, "search_cross"))
@@ -1057,9 +1140,11 @@ def run_quiz(session, cfg, log, page, popup, bank, online=None, humanizer=None):
                 tiku_hits += 1
             elif rec_source == "reasoning" or source.startswith(("兜底推理", "推理判断")):
                 guess_hits += 1
-            elif source.startswith("大模型"):
+            elif source.startswith("大模型") or source.startswith("搜索复核"):
                 llm_hits += 1
-                bank.record(q.stem, answer, q.type, source="llm")
+                # 互证通过的答案按 llm_verified(4) 入库，可被结果页回读(5)覆盖，
+                # 但不会被单源搜索等弱证据推翻。
+                bank.record(q.stem, answer, q.type, source=rec_source)
             else:
                 online_hits += 1
                 # 记录来源：双源一致=已核对 / 冲突采信 / 单源未验证（结果页回读可覆盖）
@@ -1081,6 +1166,12 @@ def run_quiz(session, cfg, log, page, popup, bank, online=None, humanizer=None):
             wait_manual_answer(log, int(cfg.quiz.pause_timeout_s), unknown)
         elif mode == "skip":
             return "manual", f"{len(unknown)} 题未作答，按配置跳过提交"
+        elif mode == "submit_blank":
+            # 无人值守：unknown 的题已无可点选项，留空也提交（任务点变绿优先）
+            pass
+        else:
+            # config 校验过枚举，正常不可达；防未来新增枚值时静默落空
+            log.warning(f"  未知 on_unknown 模式 {mode!r}，按 submit_blank 处理")
 
     submitted = submit_quiz(page, log, humanizer)
     if submitted is None:

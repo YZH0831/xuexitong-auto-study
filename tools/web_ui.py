@@ -307,12 +307,20 @@ def stop_job() -> tuple[bool, str]:
     if p is None or p.poll() is not None:
         return False, "当前没有由控制台启动的任务"
     try:
-        p.terminate()
+        if os.name == "nt":
+            # Windows：terminate() 本身就是硬杀（不会走 Python 的清理逻辑），
+            # 且杀不掉 Playwright 拉起的浏览器子进程 → taskkill 连树清理，
+            # 防浏览器野进程残留。旧文案"已发送停止指令"与行为不符，一并纠正。
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(p.pid)],
+                capture_output=True, timeout=15, creationflags=NO_WINDOW)
+        else:
+            p.terminate()
         try:
-            p.wait(timeout=4)
+            p.wait(timeout=8)
         except subprocess.TimeoutExpired:
             p.kill()
-        return True, "已发送停止指令，浏览器窗口可能需要手动关闭"
+        return True, "已强制结束任务（连同其拉起的浏览器进程）"
     except OSError as e:
         return False, f"停止失败：{e}"
 
@@ -478,6 +486,14 @@ class Handler(BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "").split(":")[0]
         return host in ("127.0.0.1", "localhost", "::1")
 
+    def _check_fetch(self) -> bool:
+        """拦浏览器跨站 POST：网页里的 no-cors 表单也能打到本地端口，
+        会越权启动任务/改写配置。Sec-Fetch-Site 主流浏览器全量发送，
+        缺失视为老客户端放行（same-origin=本页，none=地址栏直接打开）。
+        """
+        fs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        return fs in ("", "same-origin", "same-site", "none")
+
     def _send(self, code: int, body: bytes, ctype: str):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -570,6 +586,9 @@ class Handler(BaseHTTPRequestHandler):
         touch()
         if not self._check_host():
             self._json({"error": "forbidden host"}, 403)
+            return
+        if not self._check_fetch():
+            self._json({"error": "cross-site rejected"}, 403)
             return
         p = self.path.split("?", 1)[0]
         data = self._body()

@@ -119,8 +119,9 @@ quiz:
     model: deepseek-flash
     reasoning_effort: ""          # 仅推理模型需要（如 kimi-k3 填 low）；普通模型留空
     max_calls: 200                # 单次运行最多调用次数（防刷爆额度）
-    min_confidence: 0.55          # 低于此置信度不自动作答（宁缺勿错）
-    cross_check_with_search: false  # 大模型答完是否再用联网搜索交叉验证
+    min_confidence: 0.62          # 低于此置信度不自动作答（宁缺勿错）
+    verify_below: 0.80            # 自报置信度低于此值→自动联网复核（校准虚高自信；0=关闭）
+    cross_check_with_search: false  # true=所有大模型答案都复核（费搜索额度，一般用 verify_below 即可）
 
 # ========== 拟人化操作 ==========
 humanize:

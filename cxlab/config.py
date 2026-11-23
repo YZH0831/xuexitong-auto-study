@@ -83,7 +83,13 @@ DEFAULTS = {
             "api_key": "",
             "model": "deepseek-flash",
             "reasoning_effort": "",
-            "min_confidence": 0.55,
+            "min_confidence": 0.62,
+            "verify_below": 0.0,        # 自报置信度低于此值→触发联网复核；0=关闭（按题型自行开启）
+            # 二次复核：程序自主判断触发（置信低/解析可疑），再唤起一次 DeepSeek 独立作答，
+            # 两次一致才提置信采纳、冲突则降置信交联网仲裁。高置信题不复核，省 API。
+            "recheck_enabled": True,
+            "recheck_below": 0.80,      # 自报置信低于此值→触发二次复核
+            "max_rechecks": 40,         # 单次运行最多复核次数（防刷爆额度）
             "timeout_s": 30,
             "max_calls": 200,
             "temperature": 0,

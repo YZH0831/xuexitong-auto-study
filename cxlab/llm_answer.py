@@ -15,15 +15,28 @@ import urllib.error
 import urllib.request
 
 SYSTEM_PROMPT = (
-    "你是严谨的中国高校课程答题助手。你会收到一道题目与全部选项。\n"
-    "请按下面的方式思考（思考过程不要输出）：\n"
-    "1. 先找出题目在问什么，标出关键限定词（时间、主体、范围）。\n"
-    "2. 逐项判断：这个选项为什么对/为什么错，错在哪。\n"
-    "3. 若题目问'错误的是/不属于/不正确'，注意反向选择。\n"
-    "4. 多个选项看似都对时，选'最准确、最完整'的那个；多选题则选全，别漏。\n"
-    "5. 判断题注意绝对化措辞（所有/一定/必须/只要…就/任何）通常暗示表述有误；\n"
-    "   但也要警惕'不能/不得/严禁'这类正确表述被误判。\n"
-    "6. 如果确实拿不准，请如实给低 confidence，不要硬猜。\n"
+    "你是严谨的中国高校课程答题助手，会收到一道题、全部选项，题型在用户消息中给出。\n"
+    "在内部完成分析与核对，不要输出思考过程：\n"
+    "1. 读题定标：通读题干与全部选项，标出关键限定词（时间/主体/范围/程度）和隐含限制，"
+    "判断题型、考点和题目真正所问；'错误的是/不属于/不正确'按反向选择。\n"
+    "2. 多解交叉验证：不局限于单一解法——先独立推导，再逐项核对每个选项对在哪、错在哪；"
+    "多个表述都像对时，选最准确、最完整的那个。\n"
+    "3. 按题型作答：严格遵循用户消息给出的题型要求；多选选全不漏，判断留意绝对化措辞"
+    "（所有/一定/必须/只要…就/任何）常有误，但'不能/不得/严禁'这类正确表述别误判。\n"
+    "4. 交付前核对：逐步检查关键步骤、结果与答案格式——字母是否在选项范围内、"
+    "多选是否按字母序、判断是否用'对/错'、填空是否带多余内容，杜绝臆测与漏答。\n"
+    "5. 不确定就核查：拿不准时如实给低 confidence，不要硬猜；"
+    "程序会据此判断是否需要唤起你再次复核。有把握才给高置信。\n"
+    "质量优先：把准确率放在第一位，只给可直接使用的结论。\n"
+    "只输出一个 JSON 对象，不输出思考过程、解释文字或 Markdown 代码块。\n"
+    'JSON 格式：{"answer": "<答案>", "confidence": <0到1的小数>, "reason": "<不超过30字的核心依据>"}'
+)
+
+# 二次复核专用提示词：换个"独立复核员"视角重新作答，避免第一次的思维定势。
+RECHECK_SYSTEM_PROMPT = (
+    "你是课程答题的独立复核员。你只会看到一道题和选项，请以完全独立的视角重新作答。\n"
+    "方法：先逐字读题干，找限定词与反向词（错误/不属于/不正确），再逐项排除，最后才给结论。"
+    "不要揣测出题人偏好，只依据题干和常识。信息不足或存在歧义时如实给低 confidence。\n"
     "只输出一个 JSON 对象，不要输出思考过程、解释文字或 Markdown 代码块。\n"
     'JSON 格式：{"answer": "<答案>", "confidence": <0到1的小数>, "reason": "<不超过30字的核心依据>"}'
 )
@@ -53,6 +66,11 @@ class LLMAnswer:
         self.reasoning_effort = str(c.get("reasoning_effort") or "").strip()
         self.calls = 0
         self.hits = 0
+        # 二次复核（程序自主判断触发）：开关 + 触发阈值 + 额外调用预算
+        self.recheck_enabled = bool(c.get("recheck_enabled", True))
+        self.recheck_below = float(c.get("recheck_below", 0.80) or 0)
+        self.max_rechecks = int(c.get("max_rechecks", 40) or 0)
+        self.rechecks = 0
         self.last_error = ""
         self.fatal = ""          # 遇到 401/402/403 这类"再试也没用"的错误后熔断
 
@@ -70,14 +88,39 @@ class LLMAnswer:
 
     # ---------------- 主流程 ----------------
     def solve(self, stem, options, qtype="single"):
-        """返回 (answer, confidence, reason) 或 (None, 0, 原因)。"""
+        """作答 + 程序自主判断是否需要二次唤起 DeepSeek 复核。
+
+        返回 (answer, confidence, reason) 或 (None, 0, 原因)。
+        两次独立作答一致 → 提置信采纳；冲突 → 降置信，交上层联网搜题仲裁。
+        """
+        ans, conf, reason = self._solve_once(stem, options, qtype)
+        if not ans:
+            return ans, conf, reason
+        # ★ 程序自己判断：该题值不值得再唤起一次 DeepSeek
+        need, why = self._should_recheck(conf, reason, ans, qtype)
+        if not need:
+            return ans, conf, reason
+        self.log.info(f"  二次复核触发（{why}）→ 再唤起 DeepSeek 独立重推一次")
+        ans2, conf2, reason2 = self._recheck(stem, options, qtype)
+        if not ans2:                # 复核调用失败 → 保留首答，但降置信交上层兜底
+            return ans, min(conf, self.recheck_below - 0.01), reason + "（复核未成功）"
+        same = self._same(ans, ans2, qtype)
+        if same:
+            boosted = max(conf, conf2, self.recheck_below + 0.05)
+            self.log.info(f"  二次复核一致 → {ans}，置信 {conf:.2f}→{boosted:.2f}")
+            return ans, boosted, f"两次独立作答一致：{reason}"
+        # 冲突：不擅自选边，降置信让上层联网双源仲裁（证据强于单模型）
+        self.log.warning(f"  二次复核冲突：首答 {ans} / 复核 {ans2} → 降置信交联网仲裁")
+        return ans, min(conf, self.recheck_below - 0.20), f"复核冲突：首答{ans}/复核{ans2}"
+
+    def _solve_once(self, stem, options, qtype):
+        """单次作答（原 solve 逻辑）：含解析失败重试一次。"""
         ok, why = self.available()
         if not ok:
             return None, 0.0, why
         prompt = self._build_prompt(stem, options, qtype)
         last_reason = ""
         for attempt in (1, 2):
-            # 解析失败后的第二次请求也占用额度；剩余次数不足时不再重试。
             ok, why = self.available()
             if not ok:
                 return None, 0.0, last_reason or why
@@ -92,6 +135,75 @@ class LLMAnswer:
             if self.fatal:          # Key/余额问题，重试也是同样结果
                 return None, 0.0, self.fatal
         return None, 0.0, last_reason or "模型未给出可用答案"
+
+    def _should_recheck(self, conf, reason, ans, qtype):
+        """程序自主判断：置信低 / 解析可疑 / 高错题型的题才值得二次唤起 DeepSeek。
+
+        返回 (bool, 原因)。清晰高置信的题直接放行，不浪费 API。
+        """
+        if not self.recheck_enabled:
+            return False, "复核已关闭"
+        ok, why = self.available()
+        if not ok:
+            return False, f"不可复核（{why}）"
+        if self.max_rechecks and self.rechecks >= self.max_rechecks:
+            return False, f"本轮复核次数已达上限（{self.max_rechecks}）"
+        # 信号1：解析层标出的可疑答案（漏选 / 题型混淆 / 存疑降置信）
+        if reason and any(k in reason for k in ("漏选", "存疑", "多个字母", "复核冲突")):
+            return True, f"解析可疑（{reason[:16]}）"
+        # 信号2：自报置信低于阈值（灰区/低置信）
+        if conf < self.recheck_below:
+            return True, f"置信 {conf:.2f} < {self.recheck_below:.2f}"
+        return False, "高置信，无需复核"
+
+    def _recheck(self, stem, options, qtype):
+        """换独立复核视角再唤起一次 DeepSeek（不复用第一次的 prompt 上下文）。"""
+        self.rechecks += 1
+        ok, why = self.available()
+        if not ok:
+            return None, 0.0, why
+        prompt = self._build_prompt(stem, options, qtype)
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": RECHECK_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions", data=body,
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.api_key}"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            raw = data["choices"][0]["message"]["content"]
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning(f"  二次复核调用失败：{str(exc)[:90]}")
+            return None, 0.0, "复核调用失败"
+        ans, conf, reason = self._parse(raw, options, qtype)
+        if ans:
+            self.hits += 1
+        return ans, conf, reason
+
+    @staticmethod
+    def _same(a, b, qtype):
+        """判断两次作答是否为同一答案（字母集合 / 判断题 / 填空文本）。"""
+        if qtype == "text":
+            norm = lambda s: re.sub(r"[\s，,。.；;]", "", str(s or "")).lower()
+            return norm(a) == norm(b) and bool(norm(a))
+        la = "".join(sorted(set(re.sub(r"[^A-Za-z]", "", str(a or "")).upper())))
+        lb = "".join(sorted(set(re.sub(r"[^A-Za-z]", "", str(b or "")).upper())))
+        if la and lb:
+            return la == lb
+        # 判断题等可能给"对/错"文本
+        na, nb = str(a or "").strip(), str(b or "").strip()
+        return na == nb and bool(na)
 
     def _build_prompt(self, stem, options, qtype):
         lines = [TYPE_HINT.get(qtype, TYPE_HINT["single"]), "", f"【题目】{stem}"]
@@ -225,10 +337,18 @@ class LLMAnswer:
         if any(ord(c) - 64 > n for c in letters):
             return None, 0.0, f"模型给出的字母超出选项范围：{ans}"
         uniq = "".join(sorted(set(letters)))
-        if qtype == "multi" and len(uniq) < 2:
-            # 多选题只给了 1 个字母 → 可能是漏选，按低置信处理但仍返回
-            return uniq, min(conf, 0.4), "多选题仅给出 1 项，可能漏选"
+        if qtype == "multi":
+            if len(uniq) < 2:
+                # 多选题只给了 1 个字母 → 可能是漏选，按低置信处理但仍返回
+                return uniq, min(conf, 0.4), "多选题仅给出 1 项，可能漏选"
+            return uniq, conf, reason
+        if len(uniq) > 1:
+            # 单选题却返回多个字母：说明模型没分清题型。若原样交给 fill_answer，
+            # 它会连点多个选项 → 单选必错。降为低置信，让上层 min_confidence
+            # 门槛拦下并转联网搜题；不直接放弃是为了不再浪费一次 API 调用重试。
+            return uniq[0], 0.3, f"单选题返回多个字母（{uniq}），存疑降置信待复核"
         return uniq, conf, reason
 
     def stats(self):
-        return {"calls": self.calls, "hits": self.hits, "model": self.model}
+        return {"calls": self.calls, "hits": self.hits, "rechecks": self.rechecks,
+                "model": self.model}

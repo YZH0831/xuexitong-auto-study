@@ -33,7 +33,7 @@ if /i "%~1"=="doctor" goto doctor
 :menu
 set "VER="
 if exist "VERSION" set /p VER=<VERSION
-if not defined VER set "VER=1.1.1"
+if not defined VER set "VER=1.1.3"
 set "LLMSTAT="
 set "LLMTIP="
 for /f "delims=" %%S in ('"%PY%" tools\set_key_gui.py --status-line 2^>nul') do (

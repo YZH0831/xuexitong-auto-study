@@ -233,9 +233,9 @@ def parse_progress(lines: list[str]) -> dict:
 
 def version() -> str:
     try:
-        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.0.0"
+        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.1.3"
     except OSError:
-        return "1.0.0"
+        return "1.1.3"
 
 
 def status_payload() -> dict:

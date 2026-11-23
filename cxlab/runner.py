@@ -241,6 +241,16 @@ class Runner:
         if scope in ("task_center", "both"):
             self.process_task_center()
         if scope in ("chapters", "both"):
+            # 章节处理可能把 session.page 停在章节详情页，作业入口只在课程主页
+            # 的框架里。先回到课程主页再找作业，否则会误报"未找到作业 tab"。
+            try:
+                url = getattr(self.course, "url", "") or ""
+                if url and self.session is not None and self.session.page is not None:
+                    self.session.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    self.session.page.wait_for_timeout(1500)
+                    self.log.info("  已复位到课程主页，开始定位作业入口")
+            except Exception as exc:  # noqa: BLE001
+                self.log.debug(f"  复位课程主页失败（继续尝试定位作业）: {str(exc)[:80]}")
             homework_mod.run_homework(self.session, self.cfg, self.log, self.popup, self.report)
 
     # ---------------- 平台进度（权威口径） ----------------

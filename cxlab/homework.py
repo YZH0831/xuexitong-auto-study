@@ -4,9 +4,28 @@ import time
 
 HOMEWORK_TAB_SELECTORS = [
     'text=作业',
+    'text=课程作业',
     'a:has-text("作业")',
+    'li:has-text("作业")',
     '[class*="tab"]:has-text("作业")',
+    'a[href*="/work/list"]',
+    'a[href*="homework"]',
 ]
+
+# 学习通把作业入口放在 iframe 里，且常见文案是"作业/课程作业/章节作业"。
+# 命中后用 URL 校验是否真的进了作业页（dohomework / work 路径），
+# 避免把导航菜单里的文字当成入口。
+WORK_URL_HINTS = ("/work/", "dohomework", "homework", "studentwork", "insertwork")
+
+
+def _has_work_items(page) -> bool:
+    """页面上是否出现作业条目或"提交作业"按钮，用于确认入口点对了。"""
+    try:
+        txt = page.evaluate(
+            "() => document.body ? document.body.innerText.slice(0, 6000) : ''") or ""
+    except Exception:  # noqa: BLE001
+        return False
+    return any(k in txt for k in ("未提交", "待提交", "提交作业", "作业详情", "未完成作业"))
 
 HOMEWORK_ITEM_SELECTORS = [
     '[class*="workItem"]',
@@ -30,21 +49,44 @@ def run_homework(session, cfg, log, popup, report):
     else:
         log.info("作业处理模式=auto：将按配置的 answer_text 自动填写并提交")
 
+    # 遍历所有 frame：学习通的章节树/作业入口常驻 iframe，只搜主 frame
+    # 会漏掉真实入口（原来误报率极高的根因）。
+    try:
+        from .course import all_frames
+        frames = all_frames(page)
+    except Exception:  # noqa: BLE001
+        frames = [page]
+
     opened = False
-    for sel in HOMEWORK_TAB_SELECTORS:
-        try:
-            el = page.query_selector(sel)
-            if el is not None and el.is_visible():
-                target, _ = session.click_capture(page, el, wait_s=10)
+    for frame in frames:
+        for sel in HOMEWORK_TAB_SELECTORS:
+            try:
+                el = frame.query_selector(sel)
+                if el is None or not el.is_visible():
+                    continue
+                target, _ = session.click_capture(frame, el, wait_s=10)
                 page = target
                 page.wait_for_timeout(2500)
-                opened = True
-                break
-        except Exception:  # noqa: BLE001
-            continue
+                # 点击后若确实进入作业页，或页面出现作业条目，才算找到
+                cur_url = (page.url or "").lower()
+                # 新标签页看 url；同框架/iframe 内跳转则逐 frame 找作业条目
+                hit = any(h in cur_url for h in WORK_URL_HINTS)
+                if not hit:
+                    try:
+                        hit = any(_has_work_items(fr) for fr in all_frames(page))
+                    except Exception:  # noqa: BLE001
+                        hit = _has_work_items(page)
+                if hit:
+                    opened = True
+                    break
+                log.debug(f"  作业候选「{sel}」点击后未进入作业页：{page.url}")
+            except Exception:  # noqa: BLE001
+                continue
+        if opened:
+            break
     if not opened:
         report.add("作业", "作业入口", "manual", "未找到作业 tab，请手动在课程中查看作业")
-        log.warning("未找到课程「作业」入口")
+        log.warning("未找到课程「作业」入口（已检查所有框架；该课程可能未布置作业）")
         return
 
     items = []

@@ -162,6 +162,8 @@ class LLMAnswer:
         ok, why = self.available()
         if not ok:
             return None, 0.0, why
+        # 复核同样是一次真实 HTTP 调用，必须计入统一预算。
+        self.calls += 1
         prompt = self._build_prompt(stem, options, qtype)
         payload = {
             "model": self.model,
@@ -183,9 +185,21 @@ class LLMAnswer:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8", errors="replace"))
             raw = data["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:200]
+            except Exception:  # noqa: BLE001
+                pass
+            self.last_error = self._explain_http(exc.code, detail)
+            if exc.code in (401, 402, 403):
+                self.fatal = self.last_error
+            self.log.warning(f"  二次复核调用失败：{self.last_error}")
+            return None, 0.0, self.last_error
         except Exception as exc:  # noqa: BLE001
-            self.log.warning(f"  二次复核调用失败：{str(exc)[:90]}")
-            return None, 0.0, "复核调用失败"
+            self.last_error = self._explain_conn(exc)
+            self.log.warning(f"  二次复核调用失败：{self.last_error}")
+            return None, 0.0, self.last_error
         ans, conf, reason = self._parse(raw, options, qtype)
         if ans:
             self.hits += 1
@@ -309,6 +323,7 @@ class LLMAnswer:
             conf = float(obj.get("confidence", 0.6))
         except Exception:  # noqa: BLE001
             conf = 0.6
+        conf = max(0.0, min(1.0, conf))
         reason = str(obj.get("reason") or "")[:60]
         if not ans:
             return None, 0.0, reason
@@ -319,12 +334,22 @@ class LLMAnswer:
 
         n = len(options or [])
         if qtype == "judge":
-            idx = 0 if re.search(r"对|正确|√|是|true|T", ans) and not re.search(r"错|不正确|不对|×|否|false|F", ans) else 1
+            # 模型若直接给选项字母，优先精确匹配，不能再按语义猜成“错”。
+            la = ans.strip().upper()
+            exact = next((o for o in (options or [])
+                          if str(o.get("letter") or "").strip().upper() == la), None)
+            if exact is not None:
+                return exact.get("letter") or la, conf, "判断题：" + ans
+            truthy = bool(re.search(r"对|正确|√|是|true", ans, re.I))
+            falsy = bool(re.search(r"错|不正确|不对|×|否|false", ans, re.I))
+            if truthy == falsy:  # 都命中或都不命中 → 无法判定，拒绝猜测
+                return None, 0.0, f"判断题答案无法识别：{ans}"
+            idx = 0 if truthy else 1
             letter = None
             for i, o in enumerate(options or []):
                 t = str(o.get("text") or "")
-                if (idx == 0 and re.search(r"对|正确|√|是|true", t)) or \
-                   (idx == 1 and re.search(r"错|不正确|不对|×|否|false", t)):
+                if (idx == 0 and re.search(r"对|正确|√|是|true", t, re.I)) or \
+                   (idx == 1 and re.search(r"错|不正确|不对|×|否|false", t, re.I)):
                     letter = o.get("letter") or chr(65 + i)
                     break
             if letter is None:

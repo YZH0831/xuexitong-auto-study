@@ -599,19 +599,24 @@ def fill_answer(q, answer, log):
         if len(targets) <= 1 and len(q.options) > 1:
             log.warning(f"  ⚠ 多选题只选中 1 项（答案：{str(answer)[:40]}）；"
                         f"若本题确为多选，请人工核对")
-    ok = False
-    for t in targets:
-        ok = _click_option(t, log) or ok
+    results = [_click_option(t, log) for t in targets]
+    ok = bool(results) and all(results)
+    if not ok:
+        log.warning(f"  ⚠ 选项未全部点击成功（成功 {sum(bool(x) for x in results)}/{len(results)}），"
+                    f"本题按未作答处理")
     if ok and q.type == "multi":
         log.info(f"  多选题已选 {len(targets)} 项：{''.join(o.get('letter') or '?' for o in targets)}")
 
-    # 选后自检：读平台隐藏域里"实际记录"的答案，发现漏选立即补选
-    if ok and q.type in ("multi", "single", "judge"):
-        want = set(letters) if letters else {o.get("letter") for o in targets if o.get("letter")}
+    # 选后自检：读平台隐藏域，漏选补选、多选取消，最终必须完全相等。
+    want = set(letters) if letters else {o.get("letter") for o in targets if o.get("letter")}
+    check_set = q.type == "multi" or bool(
+        want and all(len(x) == 1 and x.isalpha() for x in want))
+    if ok and check_set:
         recorded = _read_recorded_answer(q.element)
         if recorded is not None and want:
             got = set(re.findall(r"[A-Za-z]", str(recorded).upper()))
             missing = {c for c in want - got if c.isalpha()}
+            extra = {c for c in got - want if c.isalpha()}
             if missing:
                 log.warning(f"  ⚠ 平台仅记录 {''.join(sorted(got)) or '空'}，缺少 "
                             f"{''.join(sorted(missing))} → 自动补选")
@@ -619,7 +624,20 @@ def fill_answer(q, answer, log):
                     t = next((o for o in q.options if o.get("letter") == letter), None)
                     if t is not None and _click_option(t, log):
                         log.info(f"     已补选 {letter}")
-                log.info(f"  补选后平台记录：{_read_recorded_answer(q.element)}")
+            if extra:
+                log.warning(f"  ⚠ 平台多记录了 {''.join(sorted(extra))} → 自动取消")
+                for letter in sorted(extra):
+                    t = next((o for o in q.options if o.get("letter") == letter), None)
+                    if t is not None and _click_option(t, log):
+                        log.info(f"     已取消 {letter}")
+            final = _read_recorded_answer(q.element)
+            final_got = set(re.findall(r"[A-Za-z]", str(final or "").upper()))
+            if final_got != want:
+                log.warning(f"  ⚠ 平台记录 {''.join(sorted(final_got)) or '空'} 与目标 "
+                            f"{''.join(sorted(want))} 不一致，本题按未作答处理")
+                ok = False
+            else:
+                log.info(f"  选后核对通过：{''.join(sorted(final_got))}")
     return ok
 
 
@@ -702,14 +720,9 @@ def _unanswered_hint(page):
 
 
 def submit_quiz(page, log, humanizer=None):
-    """提交测验：点提交 → 处理二次确认 → 复核是否真的提交成功。
-
-    注意：学习通提交后会弹二次确认框，而弹窗看门狗出于安全默认不点"提交/交卷"类按钮，
-    因此这里必须显式确认，否则会"看起来点了提交但实际没提交"。
-    """
+    """提交测验：点提交 → 处理二次确认 → 必须有请求或页面变化才判成功。"""
     btn = _submit_button(page)
     if btn is None:
-        # 按钮可能还在渲染，或在折叠区/页面下方 → 滚一下再看几次
         _p = getattr(page, "page", page)
         for _ in range(3):
             _wait(page, 1500)
@@ -722,10 +735,23 @@ def submit_quiz(page, log, humanizer=None):
                 log.info("  滚动后找到提交按钮")
                 break
     if btn is None:
-        # 返回 None 表示「压根没有提交按钮」→ 调用方应直接跳过本节，
-        # 不要再去等 3 分钟复核（用户反馈：找不到按钮就别干等）
         log.warning("  重试 3 次仍未找到提交按钮 → 跳过本节，直接进入下一节")
         return None
+
+    evidence = []
+    before_url = getattr(page, "url", "")
+
+    def _on_response(r):
+        url = (r.url or "").lower()
+        if any(k in url for k in ("submit", "answer", "quiz", "test", "score", "result")):
+            evidence.append((r.status, url))
+
+    listener_ok = True
+    try:
+        page.on("response", _on_response)
+    except Exception:  # noqa: BLE001  FakePage 无事件接口时降级
+        listener_ok = False
+
     try:
         if humanizer is not None:
             humanizer.click(getattr(page, "page", page), btn, timeout=5000)
@@ -736,26 +762,39 @@ def submit_quiz(page, log, humanizer=None):
         return False
     _wait(page, 2000)
 
-    for attempt in range(1, 4):
-        if _confirm_dialog(page, log):
-            _wait(page, 3000)
-        if _submit_button(page) is None:
-            log.info("  提交成功（提交按钮已消失）")
-            return True
-        hint = _unanswered_hint(page)
-        if hint:
-            log.warning(f"  平台拦截提交：{hint} → 不再重复提交；转去重扫页面剩余任务/人工处理")
-            return False
-        log.info(f"  第 {attempt} 次提交后仍检测到提交按钮 → 重试")
-        again = _submit_button(page)
-        if again is not None:
+    try:
+        for attempt in range(1, 4):
+            if _confirm_dialog(page, log):
+                _wait(page, 3000)
+            if _submit_button(page) is None:
+                after_url = getattr(page, "url", "")
+                ok = bool(evidence) or bool(
+                    before_url and after_url and before_url != after_url)
+                if ok:
+                    log.info("  提交成功（有请求/页面变化证据）")
+                else:
+                    log.warning("  提交按钮虽消失，但无请求或页面变化证据 → 不判成功")
+                return ok
+            hint = _unanswered_hint(page)
+            if hint:
+                log.warning(f"  平台拦截提交：{hint} → 不再重复提交；转去重扫页面剩余任务/人工处理")
+                return False
+            log.info(f"  第 {attempt} 次提交后仍检测到提交按钮 → 重试")
+            again = _submit_button(page)
+            if again is not None:
+                try:
+                    again.click(timeout=3000)
+                except Exception:  # noqa: BLE001
+                    pass
+            _wait(page, 2500)
+        log.warning("  提交后仍存在提交按钮 → 可能未提交成功，将在复核阶段确认")
+        return False
+    finally:
+        if listener_ok:
             try:
-                again.click(timeout=3000)
+                page.remove_listener("response", _on_response)
             except Exception:  # noqa: BLE001
                 pass
-        _wait(page, 2500)
-    log.warning("  提交后仍存在提交按钮 → 可能未提交成功，将在复核阶段确认")
-    return False
 
 
 def _verify_feedback_value(v, q):
@@ -813,33 +852,36 @@ def read_result(page, questions, bank, log):
                 break
             except ValueError:
                 continue
-    # 回读正确答案沉淀题库。
-    # ★ 2026-11-23 防污染：quiz_result 是最高可信度（RANK=5），一旦写入，
-    #   任何低等级证据都覆盖不了（answers.py 只允许高等级覆盖低等级），
-    #   等于把错误答案永久锁死。旧实现的问题：
-    #   a) 选择器含 .answer —— 结果页"我的答案"布局类同样命中，用户自己
-    #      填错的文本会以最高可信度入库；
-    #   b) 回读值不经任何归属校验 —— 解析段落/整块反馈文本直接拼接。
-    #   现在每条值必须通过 _verify_feedback_value（确实是本题的选项/
-    #   选项字母/判断词）才沉淀；无选项的填空题无法验证 → 不沉淀
-    #   （宁缺勿污染，题库干净比数量重要）。
+    # 回读正确答案沉淀题库：只认明确的正确标记 class token，
+    # 排除 incorrect / wrong / copyright / bright 等子串误命中；
+    # 且只有真正读到分数才沉淀，避免在答题页污染题库。
     recorded = 0
-    for q in questions:
-        if not q.options:
-            continue
-        try:
-            rights = q.element.query_selector_all(
-                '[class*="right"], [class*="correct"], [class*="true"]')
-        except Exception:  # noqa: BLE001
-            continue
-        values = []
-        for r in rights:
-            got = _verify_feedback_value(_visible_text(r), q)
-            if got and got not in values:
-                values.append(got)
-        if values:
-            bank.record(q.stem, "|".join(values[:6]), q.type)
-            recorded += 1
+    if score is not None:
+        for q in questions:
+            if not q.options:
+                continue
+            try:
+                rights = q.element.query_selector_all(
+                    '[class~="correct"], [class~="right"], [class~="true"],'
+                    ' [class~="rightAnswer"], [class~="correctAnswer"],'
+                    ' [class~="answer-correct"], [class~="answer-right"]')
+            except Exception:  # noqa: BLE001
+                continue
+            values = []
+            for r in rights:
+                try:
+                    cls = (r.get_attribute("class") or "").lower()
+                except Exception:  # noqa: BLE001
+                    cls = ""
+                if any(bad in cls for bad in
+                       ("incorrect", "wrong", "copyright", "bright", "unright")):
+                    continue
+                got = _verify_feedback_value(_visible_text(r), q)
+                if got and got not in values:
+                    values.append(got)
+            if values:
+                bank.record(q.stem, "|".join(values[:6]), q.type)
+                recorded += 1
     if recorded:
         log.info(f"  已从结果页沉淀 {recorded} 道题到题库（已逐条校验归属）")
     return score
@@ -866,7 +908,10 @@ def wait_manual_answer(log, timeout_s, questions):
             pass
 
     threading.Thread(target=_reader, daemon=True).start()
-    event.wait(timeout_s)
+    completed = event.wait(timeout_s)
+    if not completed:
+        log.warning("人工作答等待超时，未确认完成")
+    return completed
 
 
 def decode_font_texts(page, questions, cfg, log):
@@ -962,7 +1007,8 @@ def run_quiz(session, cfg, log, page, popup, bank, online=None, humanizer=None):
         # 平台对题面做字体混淆（实测：环境保护法 → 环糵保护孾），无法可靠自动作答
         log.warning("未自动解析到题目（本章测验可能采用字体混淆或自定义组件）")
         log.warning("→ 请在浏览器窗口里手动完成本章测验，完成后在控制台回车，程序会自动提交")
-        wait_manual_answer(log, int(cfg.quiz.pause_timeout_s), [])
+        if not wait_manual_answer(log, int(cfg.quiz.pause_timeout_s), []):
+            return "manual", "未解析到题目且人工作答超时，本轮未提交"
         _sub = submit_quiz(page, log, humanizer)
         if _sub is None:
             return "skipped", "未找到提交按钮 → 跳过本节，直接进入下一节"
@@ -1162,8 +1208,11 @@ def run_quiz(session, cfg, log, page, popup, bank, online=None, humanizer=None):
 
     if unknown:
         mode = cfg.quiz.on_unknown
+        manual_done = False
         if mode == "pause":
-            wait_manual_answer(log, int(cfg.quiz.pause_timeout_s), unknown)
+            manual_done = wait_manual_answer(log, int(cfg.quiz.pause_timeout_s), unknown)
+            if not manual_done:
+                return "manual", f"{len(unknown)} 题等待人工超时，本轮未提交"
         elif mode == "skip":
             return "manual", f"{len(unknown)} 题未作答，按配置跳过提交"
         elif mode == "submit_blank":
@@ -1187,6 +1236,6 @@ def run_quiz(session, cfg, log, page, popup, bank, online=None, humanizer=None):
         note += f"，得分 {score}"
     if conflicts:
         note += f"；双源冲突 {len(conflicts)} 题（已按策略采信）：" + "；".join(conflicts[:2])
-    if unknown:
+    if unknown and manual_done:
         note += f"，其中 {len(unknown)} 题由人工完成"
     return "done", note

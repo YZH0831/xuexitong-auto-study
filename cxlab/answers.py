@@ -204,7 +204,8 @@ class QuestionBank:
         entry = self.entries.get(key)
         new_rank = RANK.get(source, 0)
         old_rank = RANK.get(entry.get("source", "online"), 0) if entry is not None else -1
-        if entry is not None and new_rank <= old_rank:
+        # 同级新证据允许纠正旧条目（后来者覆盖），低等级仍不得覆盖高等级。
+        if entry is not None and new_rank < old_rank:
             return
         rec = {"answer": str(answer), "type": qtype or (entry or {}).get("type", ""),
                "source": source}

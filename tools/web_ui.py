@@ -208,20 +208,35 @@ _MUTEX_NAME = "Local\\CXConsole_" + hashlib.md5(
 
 
 def acquire_instance_mutex() -> bool:
-    """进程级单实例锁：连点两次时后启动的进程直接切到已有窗口。"""
+    """进程级单实例锁：连点两次时后启动的进程直接切到已有窗口。
+
+    ★ 2026-11-25 修复：原来用 ctypes.windll + kernel32.GetLastError()，
+      但 ctypes.windll 默认不保留 Win32 last-error —— GetLastError() 恒为 0，
+      于是 ERROR_ALREADY_EXISTS(183) 永远读不到，锁形同虚设，连点两次照样
+      开第二个控制台（实测 6 个 pythonw 进程、多个端口）。
+      正确做法：WinDLL(..., use_last_error=True) + ctypes.get_last_error()，
+      并显式声明 argtypes/restype，避免 64 位下句柄/字符串被截断。
+    """
     global _MUTEX_HANDLE
     if os.name != "nt":
         return True
     try:
         import ctypes
-        k = ctypes.windll.kernel32
+        from ctypes import wintypes
+
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        k.CreateMutexW.restype = wintypes.HANDLE
+        k.CloseHandle.argtypes = [wintypes.HANDLE]
+        ctypes.set_last_error(0)
         h = k.CreateMutexW(None, False, _MUTEX_NAME)
+        err = ctypes.get_last_error()
         if not h:
             return True  # 拿不到锁就退回端口探测逻辑
-        if k.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        if err == 183:  # ERROR_ALREADY_EXISTS：已有实例持有锁
             k.CloseHandle(h)
             return False
-        _MUTEX_HANDLE = h
+        _MUTEX_HANDLE = h   # 保持句柄存活到进程退出，锁才不会提前释放
         return True
     except Exception:  # noqa: BLE001
         return True
@@ -306,7 +321,7 @@ def parse_progress(lines: list[str]) -> dict:
 
 def version() -> str:
     try:
-        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.1.4"
+        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.1.5"
     except OSError:
         return "1.1.3"
 

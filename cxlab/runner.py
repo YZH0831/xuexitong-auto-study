@@ -1882,7 +1882,10 @@ class Runner:
         # 仍有剩余时再找“提交/下一节”入口。manual/failed 不乱点提交。
         if status == "done" and isinstance(hint, int) and hint > 0:
             log.info(f"  内容处理后仍有 {hint} 个任务点未完成 → 重扫当前页剩余任务")
-            r_status, r_note = self._rescan_current_tasks(ch, page)
+            # ★ allow_quiz=True：这是「内容做完了、小圆仍橙」的场景，剩余任务
+            #   很可能就是「2章节测验」这类题目标签。旧版重扫无条件跳过题目 →
+            #   白等几分钟再靠「下一节」兜底。这里允许直接点开做。
+            r_status, r_note = self._rescan_current_tasks(ch, page, allow_quiz=True)
             if r_status == "done":
                 note += f"；重扫处理：{r_note}"
                 hint = self._verify_chapter(ch)
@@ -2184,13 +2187,20 @@ class Runner:
                 note = f"{note}；重扫处理：{r_note}"
         return status, note
 
-    def _rescan_current_tasks(self, ch, page):
-        """提交被拦截后重扫当前章节：只处理视频/音频/文档，不重复提交题目。"""
+    def _rescan_current_tasks(self, ch, page, allow_quiz=False):
+        """重扫当前章节的剩余任务点。
+
+        allow_quiz=False（提交被拦截后调用）：只处理视频/音频/文档，跳过题目，
+          避免平台拦「仍有未作答」时重复交白卷。
+        allow_quiz=True（内容做完、小圆仍橙时调用）：题目标签（如「2章节测验」）
+          很可能就是唯一没做的任务点，应当点开做，而不是跳过再绕「下一节」。
+        """
         log = self.log
-        log.info("  重扫当前页：检查视频/音频/文档是否仍未完成；题目项保持人工，不重复提交")
+        log.info("  重扫当前页：检查视频/音频/文档是否仍未完成"
+                 + ("；题目标签本轮可处理" if allow_quiz else "；题目项保持人工，不重复提交"))
         done, tried = [], []
 
-        # ① 标签式任务点：逐个打开，跳过题目标签
+        # ① 标签式任务点：逐个打开；题目标签按 allow_quiz 决定跳过还是做
         tabs = self._quiz_tabs(page)
         if tabs:
             for i in range(len(tabs)):
@@ -2200,7 +2210,33 @@ class Runner:
                     break
                 tframe, tel, ttext, tkind = tabs_i[i]
                 if tkind == "quiz":
-                    log.info(f"   重扫跳过题目标签：{ttext}（不重复提交）")
+                    if not allow_quiz:
+                        log.info(f"   重扫跳过题目标签：{ttext}（不重复提交）")
+                        continue
+                    # 提交被拦截过的章节不重复做，防止再交一次白卷
+                    if str(ch.id) in self._submit_blocked_ids:
+                        log.info(f"   重扫跳过题目标签：{ttext}（本章提交已被拦截）")
+                        continue
+                    # ★ 直接点「2章节测验」这类标签 → 打开答题页做题
+                    log.info(f"   重扫点开题目标签：{ttext}（小圆仍橙，补做测验）")
+                    try:
+                        page_i, _ = self.session.click_capture(page_i, tel, wait_s=6)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(f"     点击测验标签失败: {str(exc)[:60]}")
+                        continue
+                    page_i.wait_for_timeout(3500)
+                    qp = self._try_open_quiz(page_i)
+                    if qp is None:
+                        log.info("     标签点开后未见答题页 → 继续下一标签")
+                        continue
+                    self.task_count += 1
+                    s, n = self._handle_quiz(qp, ch)
+                    log.info(f"     重扫测验结果: {s} | {str(n)[:70]}")
+                    tried.append(ttext)
+                    if s == "done":
+                        done.append(ttext)
+                    if self._verify_chapter(ch, rounds=1) == 0:
+                        return "done", "已全部完成"
                     continue
                 if tkind == "goal":
                     continue
@@ -2237,7 +2273,22 @@ class Runner:
                     elif cards_i is not None:
                         t_i = course_mod.card_type(cards_i)
                         if t_i == "quiz":
-                            log.info(f"   重扫跳过第 {idx + 1} 页题目（不重复提交）")
+                            if not allow_quiz or str(ch.id) in self._submit_blocked_ids:
+                                log.info(f"   重扫跳过第 {idx + 1} 页题目（不重复提交）")
+                                continue
+                            # ★ 小圆仍橙且本章没被拦截 → 这一页就是没做的测验，点开做
+                            log.info(f"   重扫点开第 {idx + 1} 页题目（补做测验）")
+                            qp = self._try_open_quiz(p_i)
+                            if qp is None:
+                                continue
+                            self.task_count += 1
+                            s, n = self._handle_quiz(qp, ch)
+                            log.info(f"   重扫第 {idx + 1} 页测验结果: {s} | {str(n)[:70]}")
+                            tried.append(f"第{idx + 1}页")
+                            if s == "done":
+                                done.append(f"第{idx + 1}页")
+                            if self._verify_chapter(ch, rounds=1) == 0:
+                                return "done", "已全部完成"
                             continue
                         if t_i not in ("video", "audio", "document", "read"):
                             continue
@@ -2251,13 +2302,24 @@ class Runner:
                     if self._verify_chapter(ch, rounds=1) == 0:
                         return "done", "已全部完成"
 
-        # ③ 单内容帧：题目不碰，其它内容处理一次
+        # ③ 单内容帧：按 allow_quiz 决定题目碰不碰，其它内容处理一次
         if not tried:
             cards = course_mod.find_content_frame(page)
             if cards is not None:
                 ctype = course_mod.card_type(cards)
                 if ctype == "quiz":
-                    log.info("   当前内容帧是题目 → 不重复提交，保持人工")
+                    if not allow_quiz or str(ch.id) in self._submit_blocked_ids:
+                        log.info("   当前内容帧是题目 → 不重复提交，保持人工")
+                    else:
+                        log.info("   当前内容帧是题目 → 小圆仍橙，补做测验")
+                        qp = self._try_open_quiz(page)
+                        if qp is not None:
+                            self.task_count += 1
+                            s, n = self._handle_quiz(qp, ch)
+                            log.info(f"   重扫测验结果: {s} | {str(n)[:70]}")
+                            tried.append("测验")
+                            if s == "done":
+                                done.append("测验")
                 elif ctype in ("video", "audio", "document", "read"):
                     s, n = self._handle_card(page, cards, ctype, ch)
                     log.info(f"   重扫结果: {s} | {str(n)[:70]}")
@@ -2267,7 +2329,9 @@ class Runner:
 
         if done:
             return "done", "、".join(done)
-        return "manual", "重扫完成：未发现可自动处理的非题目任务；题目项保持人工"
+        return "manual", ("重扫完成：未发现可处理的剩余任务"
+                          if allow_quiz else
+                          "重扫完成：未发现可自动处理的非题目任务；题目项保持人工")
 
     def _handle_quiz(self, page, ch):
         if not self._should_handle("quiz"):

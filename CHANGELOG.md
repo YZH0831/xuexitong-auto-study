@@ -2,6 +2,36 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.1.5] - 2026-11-25
+
+修复用户实测反馈的两个问题：连点 bat 仍会开两个控制台、重扫不会点「2章节测验」标题做题。
+
+### 修复
+
+- **单实例锁此前形同虚设**（`tools/web_ui.py acquire_instance_mutex`）：
+  原来用 `ctypes.windll.kernel32` + `k.GetLastError()` 判断 `ERROR_ALREADY_EXISTS`，
+  但 `ctypes.windll` 默认**不保留 Win32 last-error**，`GetLastError()` 恒为 0，
+  于是第二个实例永远被当成第一个放行——实测同时存在 2 个 `web_ui.py` 进程
+  （一个监听 8765，另一个空转）。现改用
+  `ctypes.WinDLL("kernel32", use_last_error=True)` + `ctypes.get_last_error()`，
+  并声明 `CreateMutexW` 的 argtypes/restype（64 位句柄不被截断）。
+  Win32 实测：首个实例 err=0 → 启动；第二个 err=183 → 切到已有窗口。
+- **重扫跳过「2章节测验」标签**（`cxlab/runner.py _rescan_current_tasks`）：
+  视频做完后若小圆仍橙，旧版重扫**无条件跳过** quiz 标签，日志反复出现
+  「重扫跳过题目标签：2章节测验」，然后白等几分钟再靠「下一节」兜底才做题。
+  现给重扫加 `allow_quiz` 参数：内容处理后重扫传 `True`，直接点开题目标签做测验；
+  提交被拦截后的重扫保持 `False`（不重复交白卷），并用 `_submit_blocked_ids`
+  双重防重复。标签式 / 多页 / 单内容帧三条路径都覆盖。
+
+  **注意**：需要重启控制台才会加载新代码——请关掉现有的学习通控制台窗口
+  （或结束残留的 `pythonw.exe tools\web_ui.py` 进程）后重新双击桌面 bat。
+
+### 测试
+
+- 新增 `tests/test_double_instance_and_quiz_tab.py`（12 项：mutex use_last_error
+  源码守卫 + 真实 Win32 首个/第二个拿锁行为 + 重扫决策行为模拟）。
+  既有 `test_quiz_and_retry.py` / `test_core.py` / `test_rescan_quiz_fix.py` 全绿。
+
 ## [1.1.4] - 2026-11-25
 
 修复「视频反复刷、章节检测测验迟迟不做」的回归 bug，并完善控制台单实例体验。

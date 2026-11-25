@@ -254,11 +254,26 @@ def duration_matches(actual, expected):
 
 
 def detect_completion_ratio(page, default=1.0):
-    """遍历所有帧，读取本视频/直播的完成百分比；没有明确文案返回 default。"""
+    """遍历帧读取本视频/直播的完成百分比；没有明确文案返回 default。
+
+    ★ 2026-11-25 修复「卡在章节页不动」：旧版对 page.frames 里每个 frame
+      都做 frame.evaluate(JS_GET_TEXT)。evalute 没有内建超时，若某个视频
+      iframe 的 JS 主线程被解码占满，就会永久挂起（实测日志停在
+      「开始处理：10.2」4 分钟不动）。改为：
+        1) 跳过 data:/about:blank/非 http 帧（它们不可能有完成度文案）；
+        2) 用 locator("body").inner_text(timeout=...) 代替 evaluate——
+           前者受 Playwright 默认超时约束，卡住最多等 3 秒自动跳过。
+    """
     best = default
     for frame in page.frames:
         try:
-            text = frame.evaluate(JS_GET_TEXT) or ""
+            url = (frame.url or "").lower()
+            if not url.startswith("http"):
+                continue
+            try:
+                text = frame.locator("body").inner_text(timeout=3000) or ""
+            except Exception:  # noqa: BLE001
+                text = ""
         except Exception:  # noqa: BLE001
             continue
         if not text:

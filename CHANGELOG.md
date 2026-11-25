@@ -2,6 +2,34 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.1.6] - 2026-11-25
+
+修复「处理到某个视频章节就永久卡住、既不点测验标签也不点下一节」。
+
+### 修复
+
+- **根因：Playwright `frame.evaluate()` 没有内建超时**，而两处代码对页面里
+  **所有 iframe** 都做 evaluate。知识点页 iframe 很多（视频/测验/文档），
+  一旦某个视频 frame 的 JS 主线程被解码或网络占满，evaluate 就永久阻塞——
+  实测日志停在「开始处理：10.2」超过 4 分钟、进程 CPU 几乎为 0（在等 I/O），
+  表现就是用户看到的「卡在视频界面不动」。
+  1. `cxlab/course.py chapter_element`：JS 标记只在「确实含章节树元素」的
+     frame 上执行，跳过视频/测验 frame；`query_selector` 遍历全部 frame 保留不变。
+  2. `cxlab/video.py detect_completion_ratio`：改为跳过 `data:`/`about:blank`
+     等非 http frame，并用 `locator("body").inner_text(timeout=3000)` 代替
+     `frame.evaluate(JS_GET_TEXT)`——前者受 Playwright 超时约束，最多等 3 秒。
+- **诊断增强**：`_process_attachment_cards` 在读取 attachments / 探测完成度
+  前后各加一条 debug 心跳日志。万一以后仍卡，可立刻从日志判断卡在哪一步，
+  不必再猜。
+
+### 说明
+
+- 本次是「有证据指向 + 防御性」修复：卡死位置（开始处理之后、发现小任务点
+  之前）与这两处全-frame evaluate 完全吻合，但不能 100% 复现证明。
+  v1.1.5 的重扫点测验标签、1x 重播守卫等修复仍保留。
+- 已加 `tests/test_double_instance_and_quiz_tab.py`（v1.1.5，12 项）覆盖此前的
+  单实例锁和测验标签问题；本版改动通过既有全部测试与 `py_compile`。
+
 ## [1.1.5] - 2026-11-25
 
 修复用户实测反馈的两个问题：连点 bat 仍会开两个控制台、重扫不会点「2章节测验」标题做题。

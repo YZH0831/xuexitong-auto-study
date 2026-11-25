@@ -1494,9 +1494,14 @@ class Runner:
         每个视频/文档有独立 jobid、isPassed、attDuration。旧逻辑只认第一个
         videoContainer，结果一直重播已完成的 516s 视频，另外 3 个根本没打开。
         """
-        jobs = course_mod.card_jobs(cards)
-        ratio = video_mod.detect_completion_ratio(page, default=None)
         log = self.log
+        # ★ 心跳日志：历史上「开始处理 X.X」后曾永久卡住（evaluate 无超时），
+        #   加这两条把 card_jobs / 完成度探测分开，下一轮若再卡能立刻定位。
+        log.debug("  小任务点：读取 mArg.attachments…")
+        jobs = course_mod.card_jobs(cards)
+        log.debug(f"  小任务点：attachments 读取完成（{len(jobs)} 个），探测完成度…")
+        ratio = video_mod.detect_completion_ratio(page, default=None)
+        log.debug("  小任务点：完成度探测完成")
         results = []
         total = 0
         ctype = "video"

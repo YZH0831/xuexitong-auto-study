@@ -949,7 +949,16 @@ def find_content_frame(page):
 
 
 def chapter_element(page, cid):
-    """定位指定章节的可点击元素（旧版 id / 新版侧边栏都支持）。"""
+    """定位指定章节的可点击元素（旧版 id / 新版侧边栏都支持）。
+
+    ★ 2026-11-25 修复「卡在章节页不动」：旧版对每个 frame 都执行
+      frame.evaluate(JS_MARK_CHAPTER, ...)。知识点页的 iframe 很多（视频、
+      测验、文档…），若其中某个 frame 的 JS 主线程正被视频解码/网络请求占满，
+      Playwright 的 evaluate 没有内建超时 → 整个进程永久挂起，日志停在
+      「开始处理：X.X」再也不动（实测 10.2 卡死 4 分钟以上）。
+      现在：JS 标记只在「确实含章节树元素」的 frame 上运行；query_selector
+      遍历所有 frame 保留不变（它受 default_timeout 约束，不会无限挂）。
+    """
     frames = []
     cached = _FRAME_CACHE.get("frame")
     if cached is not None:
@@ -964,6 +973,12 @@ def chapter_element(page, cid):
             if el is not None:
                 return frame, el
             # 新版 posCatalog 侧边栏不一定有稳定 id；先由 JS 标记目标节点再取回。
+            # ★ 只在含章节树元素的 frame 上跑 JS，避免视频/测验 iframe 卡死 evaluate。
+            if frame.query_selector(
+                'div.chapter_item[id^="cur"], a[href*="chapterId"], '
+                'a[href*="knowledgeId"], .posCatalog_select'
+            ) is None:
+                continue
             if frame.evaluate(JS_MARK_CHAPTER, str(cid)):
                 el = frame.query_selector('[data-cx-target="1"]')
                 if el is not None:

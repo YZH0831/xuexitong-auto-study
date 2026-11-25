@@ -1619,6 +1619,9 @@ class Runner:
         # 大任务点里若存在 mArg.attachments 小任务点，必须优先按 jobid 逐个处理；
         # 旧版 tab / 多页 / 视频优先分支会抢先打开第一张卡，导致反复播已完成视频。
         handled_by_jobs = False
+        # ★ 防止「重复刷视频不做题」：本节是否已在 job 处理后补做过测验。
+        #   一旦补做过，就不要再把「小圆仍橙」当成视频没登记去 1x 重播。
+        quiz_done_after_jobs = False
         if cards is not None and course_mod.card_jobs(cards):
             multi_pre = self._process_attachment_cards(ch, page, cards)
             if multi_pre is not None:
@@ -1629,6 +1632,26 @@ class Runner:
             else:
                 status, note, ctype = "done", "小任务点全部已完成", "video"
             handled_by_jobs = True
+
+            # ★ 根因修复：card_jobs() 只收 video/audio/document，章节测验/作业
+            #   不在 jobid 清单里。若本节「视频 + 章节测验」并存，视频做完小圆仍橙，
+            #   旧逻辑会把「未完成」误判为倍速没登记 → 1x 重播视频；而后面的重扫
+            #   又明确跳过题目 → 一直刷视频、永远不做测验（用户反馈的现象）。
+            #   这里在 job 处理完、小圆仍橙且有答题入口时，主动补做一次测验。
+            #   提交被平台拦截过的章节不再重复提交（本 run 内）。
+            if self._should_handle("quiz") and str(ch.id) not in self._submit_blocked_ids:
+                hint_jobs = self._verify_chapter(ch, rounds=1)
+                if isinstance(hint_jobs, int) and hint_jobs > 0:
+                    page_q, _ = self._open_chapter(ch)
+                    qp = self._try_open_quiz(page_q)
+                    if qp is not None:
+                        log.info("  小任务点处理后仍有未完成 → 补做章节测验/作业"
+                                 "（避免重复刷视频不做题）")
+                        self.task_count += 1
+                        s_q, n_q = self._handle_quiz(qp, ch)
+                        if s_q != "skipped":
+                            status, note, ctype = s_q, f"{note}；补做测验：{n_q}", "quiz"
+                            quiz_done_after_jobs = True
 
         # ①-A tab 式任务点（"1学习目标 / 2微课视频 / 3章节测验"）→ 逐个标签处理，按内容分派
         tabs = [] if handled_by_jobs else self._quiz_tabs(page)
@@ -1835,7 +1858,10 @@ class Runner:
         else:
             hint = self._verify_chapter(ch)
         # 兜底：用了倍速但平台没登记（实测平台按真实时间核验）→ 用 1 倍速重播一次
-        if rate_used > 1.0 and isinstance(hint, int) and hint > 0:
+        # ★ 但如果本节刚补做过测验，剩下未完成的很可能是测验而非视频，
+        #   此时重播整段视频纯属浪费（用户反馈的「重复刷视频」），跳过重播。
+        if (rate_used > 1.0 and isinstance(hint, int) and hint > 0
+                and not quiz_done_after_jobs):
             log.warning(f"  平台未登记倍速播放（rate={rate_used}x）→ 改用 1 倍速重播一次")
             page2, cards2 = self._open_chapter(ch)
             if cards2 is not None and course_mod.card_type(cards2) == "video":

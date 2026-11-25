@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -76,6 +77,7 @@ PROC_START = 0.0
 SERVER: ThreadingHTTPServer | None = None
 LAST_HIT = time.time()
 APP_TAG = "cx-console"
+WINDOW_TITLE = "学习通自动化助手 · 控制台"
 IDLE_EXIT_S = 30 * 60
 
 EDGE_CANDIDATES = (
@@ -122,19 +124,53 @@ def focus_window() -> bool:
     """已有应用窗口就唤到前台，而不是再开一个。"""
     try:
         import ctypes
+        from ctypes import wintypes
+
         u = ctypes.windll.user32
-        h = u.FindWindowW(None, "学习通自动化助手 · 控制台")
-        if not h:
+        found = None
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _each(hwnd, _):
+            nonlocal found
+            n = u.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                u.GetWindowTextW(hwnd, buf, n + 1)
+                if WINDOW_TITLE in buf.value:
+                    found = hwnd
+                    return False
+            return True
+
+        u.EnumWindows(_each, 0)
+        if not found:
+            found = u.FindWindowW(None, WINDOW_TITLE)
+        if not found:
             return False
-        u.ShowWindow(h, 9)
-        u.SetForegroundWindow(h)
+        u.ShowWindow(found, 9)
+        u.SetForegroundWindow(found)
+        try:
+            u.SwitchToThisWindow(found, True)
+        except Exception:  # noqa: BLE001
+            pass
         return True
     except Exception:  # noqa: BLE001
         return False
 
 
-def open_app_window(url: str) -> bool:
+def wait_for_window(timeout: float = 4.0) -> bool:
+    """等首个实例把窗口拉起来：服务端口先就绪，窗口要晚一点才出现。"""
+    end = time.time() + timeout
+    while time.time() < end:
+        if focus_window():
+            return True
+        time.sleep(0.15)
+    return False
+
+
+def open_app_window(url: str, wait_s: float = 0.0) -> bool:
     """用 Edge 应用模式打开：独立窗口，无地址栏、无标签页。"""
+    if wait_s and wait_for_window(wait_s):
+        return True
     if focus_window():
         return True
     exe = edge_path()
@@ -164,6 +200,43 @@ def find_running() -> int:
         except Exception:  # noqa: BLE001
             continue
     return 0
+
+
+_MUTEX_HANDLE = None
+_MUTEX_NAME = "Local\\CXConsole_" + hashlib.md5(
+    str(ROOT).encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def acquire_instance_mutex() -> bool:
+    """进程级单实例锁：连点两次时后启动的进程直接切到已有窗口。"""
+    global _MUTEX_HANDLE
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.CreateMutexW(None, False, _MUTEX_NAME)
+        if not h:
+            return True  # 拿不到锁就退回端口探测逻辑
+        if k.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            k.CloseHandle(h)
+            return False
+        _MUTEX_HANDLE = h
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def wait_running_port(timeout: float = 8.0) -> int:
+    """等另一个实例把服务端口绑好，避免它还没起来就误判为没有实例。"""
+    end = time.time() + timeout
+    while True:
+        port = find_running()
+        if port:
+            return port
+        if time.time() >= end:
+            return 0
+        time.sleep(0.2)
 
 
 def idle_watchdog():
@@ -233,7 +306,7 @@ def parse_progress(lines: list[str]) -> dict:
 
 def version() -> str:
     try:
-        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.1.3"
+        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.1.4"
     except OSError:
         return "1.1.3"
 
@@ -666,12 +739,20 @@ def main() -> int:
         print("找不到 .venv\\Scripts\\python.exe，请先运行 setup.bat")
         return 1
     quiet = "--no-browser" in sys.argv
+    if not acquire_instance_mutex():
+        print("已有控制台实例正在启动或运行，正在切换到已有窗口")
+        if not quiet:
+            port = wait_running_port(8.0)
+            url = f"http://127.0.0.1:{port}" if port else ""
+            if not open_app_window(url, wait_s=4.0) and not port:
+                print("另一个实例尚未就绪，请稍后再点一次")
+        return 0
     running = find_running()
     if running:
         url = f"http://127.0.0.1:{running}"
         print(f"控制台已在运行：{url}")
         if not quiet:
-            open_app_window(url)
+            open_app_window(url, wait_s=4.0)
         return 0
     port = pick_port()
     SERVER = ThreadingHTTPServer(("127.0.0.1", port), Handler)

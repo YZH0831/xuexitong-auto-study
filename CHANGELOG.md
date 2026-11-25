@@ -2,6 +2,34 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.1.4] - 2026-11-25
+
+修复「视频反复刷、章节检测测验迟迟不做」的回归 bug，并完善控制台单实例体验。
+
+### 修复
+
+- **视频 job 处理后补做测验**（`cxlab/runner.py process_chapter`）：章节同时含
+  「视频附件 + 章节测验」时，`card_jobs()` 只识别 video/audio/document，测验不在
+  jobid 清单里。视频播完小圆仍橙（其实是测验没做），旧逻辑误判为「倍速未被平台
+  登记」→ 1x 重播整段视频；而复核重扫又明确跳过题目 → 陷入「一直刷视频、
+  永远不做题」。现在 job 处理完、小圆仍橙且有答题入口时主动补做一次测验
+  （`_try_open_quiz` → `_handle_quiz`），并把该章节记入
+  `_submit_blocked_ids` 语义下的防重复提交保护——补做过的章节不再触发
+  无谓的 1x 视频重播。纯视频章节的 1x 重播兜底保持不变。
+- 答题入口藏在「下一节」之后的章节，仍由既有的 `_continue_next_block` 兜底覆盖，
+  逻辑闭环完整。
+
+### 新增
+
+- **控制台单实例锁**（`tools/web_ui.py`，此前未提交的工作）：进程级互斥锁 +
+  窗口枚举聚焦，连点两次 bat 时后启动的实例直接切到已有窗口，不再开第二个
+  控制台；新增 `wait_running_port` / `wait_for_window` 等待先例就绪，避免竞态误判。
+
+### 测试
+
+- 新增 `tests/test_rescan_quiz_fix.py`（9 项：源码守卫 + 补做测验/重播守卫行为模拟）；
+  `tests/test_quiz_and_retry.py`、`tests/test_core.py` 全绿；改动文件通过 `py_compile`。
+
 ## [1.1.3] - 2026-11-23
 
 安全审计专项修复 + 题库防污染；一并提交此前的「大模型二次复核」功能。

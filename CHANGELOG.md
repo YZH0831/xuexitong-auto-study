@@ -2,6 +2,42 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.2.3] - 2026-11-25
+
+修复 v1.1.8 引入的回归：`card_jobs()` 在「取不到 mArg.attachments」时会抛
+`AttributeError`，导致 CI（Python 3.10 / 3.12）双红，实跑时也可能把整章学习打断。
+
+### 根因
+
+v1.1.8 给 `card_jobs` 的 evaluate / content 都加了超时，但写法有差别：
+
+```python
+attachments = eval_with_timeout(cards_frame, "() => ...", ...)   # 属性访问在线程里
+if not attachments:
+    html_src = call_with_timeout(cards_frame.content, ...)        # 属性访问在主线程 ← 炸点
+```
+
+- `eval_with_timeout` 内部才去 `cards_frame.evaluate(...)`，`AttributeError` 被线程里的
+  `except` 吞掉，返回 default，所以一直没暴露。
+- `cards_frame.content` 是在**主线程求值**后当参数传进去的：对象没有 `content` 属性就
+  当场抛 `AttributeError`，超时包装根本没机会生效。
+- 因此只要 `card_jobs` 收到的不带 `content`（降级/桩对象、帧已销毁），就会直接把
+  调用方（`_process_attachment_cards` / `process_chapter`）打断，而不是走 HTML 兜底。
+
+### 修复
+
+- `card_jobs()` 改为先 `getattr(cards_frame, "content", None)` 并校验可调用，再交给
+  `call_with_timeout`；取属性本身也套 `try/except`，异常一律降级为空 HTML。
+  无法解析时返回空清单，交由上层「逐卡处理」分支兜底，不再抛异常。
+- `tests/test_card_jobs_timeout.py`：源码断言从「必须写 `call_with_timeout(cards_frame.content`」
+  改为「不得存在裸 `cards_frame.content`、必须有 `getattr` 保护」，并新增行为断言
+  `card_jobs(object()) == []`（非 frame 对象不抛异常）。
+
+### 验证
+
+- 全量离线测试 23 个文件全绿；密钥扫描通过；`tools/package.py` 打包后解压校验
+  `import cxlab` + `python main.py --version` 均正常。
+
 ## [1.2.2] - 2026-11-25
 
 修复「有时刚点开助手、还没选课就自动弹出学习通」。

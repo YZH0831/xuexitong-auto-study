@@ -1100,8 +1100,19 @@ def card_jobs(cards_frame):
         timeout_s=8.0, default=[],
     ) or []
     if not attachments:
-        # content() 同样可能挂起，也加超时兜底
-        html_src = call_with_timeout(cards_frame.content, timeout_s=8.0, default="")
+        # content() 同样可能挂起，也加超时兜底。
+        # ★ 取属性这一步本身也要防炸：曾经直接写 cards_frame.content，
+        #   调用方传入的不是真 frame（降级/桩对象）时会抛 AttributeError，
+        #   而这里在卡死路径上，一旦抛就把整轮学习打断（CI 曾因此挂 3 个
+        #   Python 版本）。evaluate 分支之所以没暴露，是因为属性访问发生在
+        #   eval_with_timeout 的线程里、被 except 吞掉了。
+        html_src = ""
+        try:
+            content_fn = getattr(cards_frame, "content", None)
+            if callable(content_fn):
+                html_src = call_with_timeout(content_fn, timeout_s=8.0, default="") or ""
+        except Exception:  # noqa: BLE001
+            html_src = ""
         attachments = parse_marg_attachments(html_src)
 
     by_job = {}

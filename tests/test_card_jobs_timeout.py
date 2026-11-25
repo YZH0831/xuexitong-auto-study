@@ -55,8 +55,17 @@ def t_helpers_exist():
 def t_card_jobs_uses_guards():
     seg = CODE[CODE.find("def card_jobs"):CODE.find("def card_type")]
     assert "eval_with_timeout(" in seg, "card_jobs 未用带超时的 evaluate"
-    assert "call_with_timeout(cards_frame.content" in seg, "content() 未加超时"
+    assert "call_with_timeout(" in seg, "content() 未加超时"
+    assert "getattr(cards_frame," in seg, "content 属性访问未做存在性保护"
+    assert "cards_frame.content" not in seg, "content 属性仍是裸访问（会 AttributeError）"
     assert "cards_frame.evaluate(" not in seg, "card_jobs 仍有裸 evaluate"
+
+
+def t_card_jobs_tolerates_non_frame():
+    """降级/桩对象不是真 frame 时，card_jobs 必须返回 [] 而不是抛异常。"""
+    from cxlab.course import card_jobs
+    got = card_jobs(object())
+    assert got == [], f"非 frame 对象应返回空清单，实际 {got}"
 
 
 def t_behavior_call_timeout_returns():
@@ -90,6 +99,7 @@ def t_behavior_eval_timeout():
 print("[card_jobs 超时保护 · 回归测试]")
 check("超时 helper 存在", t_helpers_exist)
 check("card_jobs 用超时包装 evaluate/content", t_card_jobs_uses_guards)
+check("行为：非 frame 对象不抛异常", t_card_jobs_tolerates_non_frame)
 check("行为：慢调用超时返回 default", t_behavior_call_timeout_returns)
 check("行为：正常调用返回值", t_behavior_call_normal_returns_value)
 check("行为：卡住的 evaluate 超时返回", t_behavior_eval_timeout)

@@ -1645,7 +1645,9 @@ class Runner:
         # ★ 防止「重复刷视频不做题」：本节是否已在 job 处理后补做过测验。
         #   一旦补做过，就不要再把「小圆仍橙」当成视频没登记去 1x 重播。
         quiz_done_after_jobs = False
+        log.info("  [心跳] 检查是否存在小任务点（card_jobs）")
         if cards is not None and course_mod.card_jobs(cards):
+            log.info("  [心跳] 进入小任务点处理")
             multi_pre = self._process_attachment_cards(ch, page, cards)
             if multi_pre is not None:
                 status, note, ctype = multi_pre

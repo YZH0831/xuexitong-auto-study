@@ -2,6 +2,37 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.1.8] - 2026-11-25
+
+**精确定位并修复卡死 10.2 的真正根因**（v1.1.7 的心跳日志立功）。
+
+### 诊断
+
+v1.1.7 的心跳日志显示：第一次打开 10.2 全部步骤走完；随后**同一章节被第二次
+打开**，走到「内容帧已就绪」后停住，**没有出现「读取 mArg.attachments」**。
+据此锁定卡点在 `_open_chapter` 返回后、`_process_attachment_cards` 内部心跳之前——
+即 `process_chapter` 里那句 `if cards is not None and course_mod.card_jobs(cards)`。
+
+`card_jobs()` 内部 `cards_frame.evaluate("() => window.mArg.attachments")`
+**没有超时**（evaluate 不受 default_timeout 约束）。第二次打开时该 frame 的
+evaluate 永久挂起。
+
+### 修复
+
+- 新增 `cxlab/course.py` 的 `call_with_timeout` / `eval_with_timeout`：
+  后台 daemon 线程执行无超时的 Playwright 调用，主线程 `join(timeout)` 限时；
+  超时返回 default，让主流程继续，卡住的线程不阻止进程退出。
+- `card_jobs` 的 `evaluate` 与兜底 `content()` 都改为带 8 秒超时；
+  超时走 HTML 解析兜底，不再永久挂起。
+- 在 `card_jobs` 条件判断前后补心跳日志，下一轮能直接看到这一步是否通过。
+
+### 测试
+
+- 新增 `tests/test_card_jobs_timeout.py`（5 项：helper 存在、card_jobs 用守卫、
+  慢调用/卡住 evaluate 能超时返回、正常调用返回值）。
+- 全部既有测试通过（quiz/retry、core、rescan_quiz_fix、
+  double_instance_and_quiz_tab、no_unguarded_evaluate），`py_compile` OK。
+
 ## [1.1.7] - 2026-11-25
 
 继续追查「开始处理 10.2 后卡死」——v1.1.6 修的两处不是全部卡点。

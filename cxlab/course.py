@@ -1026,6 +1026,53 @@ def unfinished_task_cards(cards_frame):
     return out
 
 
+def call_with_timeout(fn, timeout_s=8.0, default=None):
+    """在后台线程里跑任意无超时的 Playwright 调用，主线程最多等 timeout_s。"""
+    box = {"done": False, "value": default}
+
+    def _run():
+        try:
+            box["value"] = fn()
+        except Exception:  # noqa: BLE001
+            box["value"] = default
+        finally:
+            box["done"] = True
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    return box["value"] if box["done"] else default
+
+
+def eval_with_timeout(frame, script, arg=None, timeout_s=8.0, default=None):
+    """在后台线程里跑 frame.evaluate，主线程最多等 timeout_s。
+
+    ★ 2026-11-25 修复「重复打开同一章节后永久卡死」：Playwright 的
+      evaluate() 没有内建超时，也不受 page.set_default_timeout 约束。
+      实测第二次打开 10.2 时，cards_frame.evaluate(读 mArg) 永久挂起，
+      日志停在「内容帧已就绪」再无输出。这里用线程 + join 限时：
+      超时就返回 default 让调用方走 HTML 解析兜底，主流程不被拖死。
+      卡住的后台线程会被标记为 daemon，不阻止进程退出。
+    """
+    box = {"done": False, "value": default}
+
+    def _run():
+        try:
+            box["value"] = frame.evaluate(script, arg) if arg is not None \
+                else frame.evaluate(script)
+        except Exception:  # noqa: BLE001
+            box["value"] = default
+        finally:
+            box["done"] = True
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if not box["done"]:
+        return default
+    return box["value"]
+
+
 def parse_marg_attachments(text):
     """从 knowledge/cards 原始 HTML 解析 mArg.attachments（只读备用）。"""
     try:
@@ -1046,17 +1093,16 @@ def card_jobs(cards_frame):
     isPassed / job 来自平台；DOM 的 ans-job-finished 只作兜底展示。
     """
     attachments = []
-    try:
-        attachments = cards_frame.evaluate(
-            "() => (window.mArg && window.mArg.attachments) || []"
-        ) or []
-    except Exception:  # noqa: BLE001
-        attachments = []
+    # ★ 带超时：这里曾永久挂起（第二次打开同一章节），超时后走 HTML 兜底。
+    attachments = eval_with_timeout(
+        cards_frame,
+        "() => (window.mArg && window.mArg.attachments) || []",
+        timeout_s=8.0, default=[],
+    ) or []
     if not attachments:
-        try:
-            attachments = parse_marg_attachments(cards_frame.content())
-        except Exception:  # noqa: BLE001
-            attachments = []
+        # content() 同样可能挂起，也加超时兜底
+        html_src = call_with_timeout(cards_frame.content, timeout_s=8.0, default="")
+        attachments = parse_marg_attachments(html_src)
 
     by_job = {}
     try:

@@ -168,7 +168,18 @@ def wait_for_window(timeout: float = 4.0) -> bool:
 
 
 def open_app_window(url: str, wait_s: float = 0.0) -> bool:
-    """用 Edge 应用模式打开：独立窗口，无地址栏、无标签页。"""
+    """用 Edge 应用模式打开：独立窗口，无地址栏、无标签页。
+
+    ★ 2026-11-25 修复「有时还没选课就自动弹出学习通」：
+      旧版在「第二个实例抢锁失败、而首个实例还没绑好端口」时会传入空 url，
+      于是执行 `edge --app=`（空地址）—— Edge 拿不到目标地址就会打开默认页
+      或**恢复上次浏览会话**，用户上次看的是学习通，就被"自动打开学习通"了。
+      现在：url 为空时绝不启动浏览器，直接返回 False。
+    """
+    url = (url or "").strip()
+    if not url:
+        # 没有可打开的地址（另一个实例尚未就绪）→ 什么都不做
+        return False
     if wait_s and wait_for_window(wait_s):
         return True
     if focus_window():
@@ -321,7 +332,7 @@ def parse_progress(lines: list[str]) -> dict:
 
 def version() -> str:
     try:
-        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.2.1"
+        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.2.2"
     except OSError:
         return "1.1.3"
 
@@ -758,8 +769,12 @@ def main() -> int:
         print("已有控制台实例正在启动或运行，正在切换到已有窗口")
         if not quiet:
             port = wait_running_port(8.0)
-            url = f"http://127.0.0.1:{port}" if port else ""
-            if not open_app_window(url, wait_s=4.0) and not port:
+            if port:
+                open_app_window(f"http://127.0.0.1:{port}", wait_s=4.0)
+            else:
+                # ★ 拿不到端口 = 首个实例还没绑好。这里只提示，绝不启动浏览器：
+                #   以前会带着空 url 开 Edge，Edge 转而恢复上次会话，
+                #   表现就是「还没选课就自动弹出学习通」。
                 print("另一个实例尚未就绪，请稍后再点一次")
         return 0
     running = find_running()

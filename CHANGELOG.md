@@ -2,6 +2,42 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.2.2] - 2026-11-25
+
+修复「有时刚点开助手、还没选课就自动弹出学习通」。
+
+### 根因
+
+`web_ui.py main()` 的抢锁失败分支：
+
+```python
+port = wait_running_port(8.0)
+url = f"http://127.0.0.1:{port}" if port else ""      # port=0 → 空串
+if not open_app_window(url, wait_s=4.0) and not port:  # 带着空串去开浏览器
+```
+
+- 连点两次 bat 时，第二个实例抢锁失败，而首个实例**还没绑好端口**，
+  于是 `url` 是空字符串。
+- `open_app_window("")` 仍然会执行 `msedge --app=`（**空地址**）。
+  Edge 拿不到目标地址，就打开默认页或**恢复上次浏览会话**——
+  用户上次看的是学习通，于是就"自动打开学习通"了。
+- 因涉及端口就绪时序，所以表现为**偶发**（"有时候"）。
+
+### 修复
+
+- `open_app_window` 开头加守卫：`url` 去空白后为空则**直接返回 False**，
+  不启动 Edge、也不调 `webbrowser.open`。
+- `main()` 抢锁失败分支改为先判断端口：拿到端口才切窗口；
+  没拿到就只打印「另一个实例尚未就绪，请稍后再点一次」，绝不碰浏览器。
+- 新增 `tests/test_no_spurious_browser.py`（4 项）：空/空白 url 不启动任何浏览器、
+  有效 url 仍正常以 `--app=` 打开、main 抢锁分支不再构造空 url。
+
+### 测试
+
+- 全部既有测试通过（quiz/retry、core、rescan_quiz_fix、
+  double_instance_and_quiz_tab、no_unguarded_evaluate、card_jobs_timeout、
+  passed_dom_marker、page_media_finished、no_spurious_browser）；`py_compile` OK。
+
 ## [1.2.1] - 2026-11-25
 
 修复 v1.2.0 引入的连带问题：**视频跳过了，但章节测验也没做**。

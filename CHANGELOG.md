@@ -2,6 +2,39 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.1.9] - 2026-11-25
+
+修复「视频任务点页面已显示完成，程序却还要重新看一遍」。
+
+### 根因
+
+项目里有**两套**任务点完成判定，口径不一致：
+
+| 路径 | 是否看 DOM 的 `ans-job-finished` |
+|---|---|
+| `unfinished_task_cards`（旧路径） | ✅ 检查（`"ans-job-finished" in cls` 就跳过） |
+| `card_jobs`（jobid 路径，**优先走这条**） | ❌ 只看平台接口 `isPassed` |
+
+平台接口的 `isPassed` 经常**滞后于页面显示**：页面 `.ans-attach-ct` 已经带上
+`ans-job-finished`（图标显示已完成），接口却仍返回 false。于是 `card_jobs`
+把已完成视频判成未完成 → 重播整段 → 播完 `isPassed` 仍是 false → 判 failed
+→ 进重试队列**再次打开同一章节**（日志里 10.2 被处理两次正是这个链路）。
+
+### 修复
+
+- `cxlab/course.py card_jobs`：先取到 task card，再把 DOM 的
+  `ans-job-finished` 纳入 `passed` 判定——
+  `passed = isPassed or dom_done or (video/audio 且无 job)`。
+  两条路径口径统一，页面显示已完成就不会再重播。
+- 新增 `tests/test_passed_dom_marker.py`（3 项：DOM 标记检查、两路径口径一致、
+  passed 行为模拟），确保不会再退回只看 `isPassed`。
+
+### 测试
+
+- 全部既有测试通过：quiz/retry、core、rescan_quiz_fix、
+  double_instance_and_quiz_tab、no_unguarded_evaluate、card_jobs_timeout；
+  `py_compile` OK。
+
 ## [1.1.8] - 2026-11-25
 
 **精确定位并修复卡死 10.2 的真正根因**（v1.1.7 的心跳日志立功）。

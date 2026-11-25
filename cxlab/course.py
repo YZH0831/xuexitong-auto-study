@@ -1138,10 +1138,23 @@ def card_jobs(cards_frame):
                 continue
             if kind == "document" and not att.get("job"):
                 continue
-            passed = bool(att.get("isPassed")) or (
-                kind in ("video", "audio") and not att.get("job")
-            )
             card, iframe = by_job.get(jobid, (None, None))
+            # ★ 2026-11-25 修复「视频任务点已显示完成却还要重看」：
+            #   旧版 passed 只看平台接口的 isPassed，而 isPassed 常常滞后——
+            #   DOM 的 .ans-attach-ct 已经带上 ans-job-finished（页面显示已完成），
+            #   接口却还是 false，于是被判未完成 → 重播整段视频 → 播完仍未通过
+            #   → 进重试队列再次打开（日志里同一章节被处理两次就是这个原因）。
+            #   这里把 DOM 完成标记也纳入判定；unfinished_task_cards 早就这么做了，
+            #   只有 jobid 这条路径漏了。
+            dom_done = False
+            try:
+                if card is not None:
+                    cls = (card.get_attribute("class") or "").lower()
+                    dom_done = "ans-job-finished" in cls
+            except Exception:  # noqa: BLE001
+                dom_done = False
+            passed = (bool(att.get("isPassed")) or dom_done
+                      or (kind in ("video", "audio") and not att.get("job")))
             try:
                 duration = int(att.get("attDuration") or 0)
             except (TypeError, ValueError):

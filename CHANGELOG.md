@@ -2,6 +2,40 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.2.1] - 2026-11-25
+
+修复 v1.2.0 引入的连带问题：**视频跳过了，但章节测验也没做**。
+
+### 问题
+
+v1.2.0 的判定是「本页没有未完成的音视频任务点 → 跳过播放」。
+但第 2 页是**纯章节测验页，根本没有音视频卡片**，同样满足这个条件，
+于是被一起跳过。日志表现：
+
+```
+[第 1/2 页] 音视频任务点已显示完成 → 跳过，不重看
+[第 2/2 页] 音视频任务点已显示完成 → 跳过，不重看     ← 测验页被误跳
+```
+
+### 修复
+
+`Runner._page_media_finished` 改为**必须「本页确实含音视频任务卡」**才可能返回
+True：
+
+- 遍历 `.ans-attach-ct`，按 iframe src 判断是否 video/audio 卡片
+- 没有任何音视频卡片（纯测验/文档页）→ 返回 `False`，**不跳过**，
+  交给 `_try_open_quiz` / `_handle_card` 正常做题
+- 有音视频卡片且全部带 `ans-job-finished` → `True`（跳过重播）
+- 有未完成的音视频 → `False`（正常播放）
+
+### 测试
+
+- 重写 `tests/test_page_media_finished.py`（4 项）：新增
+  **「纯测验页不得跳过」** 和「视频完成+测验未完成 → 跳过视频去做题」两个关键用例。
+- 全部既有测试通过（quiz/retry、core、rescan_quiz_fix、
+  double_instance_and_quiz_tab、no_unguarded_evaluate、card_jobs_timeout、
+  passed_dom_marker）；`py_compile` OK。
+
 ## [1.2.0] - 2026-11-25
 
 **修复「视频任务点已显示完成还一遍遍重看、永远轮不到做测验」的真正执行路径。**

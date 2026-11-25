@@ -1337,14 +1337,16 @@ class Runner:
 
     @staticmethod
     def _page_media_finished(cards_frame):
-        """该页是否已经「没有未完成的音视频任务点」——可跳过播放。
+        """该页的**音视频任务点**是否都已显示完成——用于跳过无谓的重播。
 
-        返回 True   = 是卡片布局，且音视频任务点都已完成（不重看）
-        返回 False  = 还有未完成的音视频任务 / 非卡片布局读不准 → 照常播放
+        返回 True   = 本页确实含音视频任务卡，且它们全部带 ans-job-finished
+        返回 False  = 本页没有音视频任务卡（纯测验/文档页）/ 仍有未完成音视频
+                      / 非卡片布局读不准  → 都不跳过，交给后续正常流程
 
-        依据：unfinished_task_cards 只列出未完成（无 ans-job-finished）的
-        video/audio/document 卡片。若它不含任何音视频项，说明视频已做完。
-        注意「有卡片」是前提——没有 .ans-attach-ct 时无法判断，只能照常播。
+        ★ 2026-11-25 二次修正：v1.2.0 初版只要「没有未完成音视频」就返回 True，
+          结果纯测验页（根本没有音视频卡片）也被判成「音视频已完成」而跳过，
+          导致第 2 页的章节测验压根没做。现在必须「本页确实含音视频卡片」
+          才允许跳过，纯测验页一律返回 False 让它走答题流程。
         """
         if cards_frame is None:
             return False
@@ -1353,12 +1355,27 @@ class Runner:
         except Exception:  # noqa: BLE001
             return False
         if not cards:
-            return False        # 非卡片布局：读不准，保守照常处理
-        try:
-            pending = course_mod.unfinished_task_cards(cards_frame)
-        except Exception:  # noqa: BLE001
-            return False
-        return not any(k in ("video", "audio") for _c, k, _f in pending)
+            return False        # 非卡片布局：读不准，保守处理
+
+        has_media = False
+        media_unfinished = False
+        for card in cards:
+            try:
+                cls = (card.get_attribute("class") or "").lower()
+                iframe = card.query_selector("iframe")
+                src = (iframe.get_attribute("src") or "").lower() if iframe else ""
+            except Exception:  # noqa: BLE001
+                continue
+            is_media = ("modules/video" in src or "ans-insertvideo" in src
+                        or "modules/audio" in src or "insertaudio" in src)
+            if not is_media:
+                continue
+            has_media = True
+            if "ans-job-finished" not in cls:
+                media_unfinished = True
+                break
+        # 只有「含音视频卡片」且「全部已完成」才允许跳过
+        return has_media and not media_unfinished
 
     def _should_handle(self, ctype):
         """所有分派路径共用的 --only 过滤，避免标签页/任务中心绕过限制。"""

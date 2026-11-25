@@ -321,7 +321,7 @@ def parse_progress(lines: list[str]) -> dict:
 
 def version() -> str:
     try:
-        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.2.0"
+        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.2.1"
     except OSError:
         return "1.1.3"
 

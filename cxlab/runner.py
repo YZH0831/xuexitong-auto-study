@@ -1335,6 +1335,31 @@ class Runner:
                 return True
         return did
 
+    @staticmethod
+    def _page_media_finished(cards_frame):
+        """该页是否已经「没有未完成的音视频任务点」——可跳过播放。
+
+        返回 True   = 是卡片布局，且音视频任务点都已完成（不重看）
+        返回 False  = 还有未完成的音视频任务 / 非卡片布局读不准 → 照常播放
+
+        依据：unfinished_task_cards 只列出未完成（无 ans-job-finished）的
+        video/audio/document 卡片。若它不含任何音视频项，说明视频已做完。
+        注意「有卡片」是前提——没有 .ans-attach-ct 时无法判断，只能照常播。
+        """
+        if cards_frame is None:
+            return False
+        try:
+            cards = cards_frame.query_selector_all(".ans-attach-ct")
+        except Exception:  # noqa: BLE001
+            return False
+        if not cards:
+            return False        # 非卡片布局：读不准，保守照常处理
+        try:
+            pending = course_mod.unfinished_task_cards(cards_frame)
+        except Exception:  # noqa: BLE001
+            return False
+        return not any(k in ("video", "audio") for _c, k, _f in pending)
+
     def _should_handle(self, ctype):
         """所有分派路径共用的 --only 过滤，避免标签页/任务中心绕过限制。"""
         only = getattr(self.args, "only", "")
@@ -1763,6 +1788,21 @@ class Runner:
                     log.info(f"   [第 {idx + 1} 页] 暂未开放 → 跳过")
                     continue
 
+                # ★ 2026-11-25 修复「视频任务点已显示完成却还重看」：
+                #   旧版只要检测到 <video> 元素就无条件播放，完全不看该任务点
+                #   是否已完成。用户看到的就是「明明显示已完成，又从头播一遍」，
+                #   而且视频占满时间，后面的章节测验一直轮不到。
+                #   这里先查卡片式任务点：若有 .ans-attach-ct 且全部带
+                #   ans-job-finished，就跳过这一页，直接进下一页（通常是测验）。
+                page_done = self._page_media_finished(cards_i)
+                if page_done:
+                    log.info(f"   [第 {idx + 1}/{len(pm)} 页] 音视频任务点已显示完成 → 跳过，不重看")
+                    last = ("done", f"第{idx + 1}页已完成")
+                    hint_i = self._verify_chapter(ch, rounds=1)
+                    if isinstance(hint_i, int) and hint_i == 0:
+                        log.info("     平台已标记完成，后续页签无需处理")
+                        break
+                    continue
                 _, vel = video_mod.find_video_element(p_i, timeout_s=10)
                 if vel is not None:
                     log.info(f"   [第 {idx + 1}/{len(pm)} 页] 检测到视频 → 播放")

@@ -575,10 +575,20 @@ class Runner:
     LOCK_MARKS = ("未开放", "不能查看", "暂不能学")
 
     def _chapter_locked(self, page):
-        """判断当前知识点是否因平台限制"未开放"（新版界面会提示开放时间）。"""
+        """判断当前知识点是否因平台限制"未开放"（新版界面会提示开放时间）。
+
+        ★ 2026-11-25 修复卡死：旧版对 page.frames 每个 frame 做无超时的
+          f.evaluate(读 innerText)。_open_chapter 每章循环调用它 8 次，
+          视频 iframe 的 evaluate 一卡住就整轮挂起（日志停在「开始处理 X.X」）。
+          改用 locator("body").inner_text(timeout=1500)——受超时约束，
+          单个 frame 最多卡 1.5 秒，并跳过非 http 帧。
+        """
         for f in course_mod.all_frames(page):
             try:
-                txt = f.evaluate("() => (document.body ? document.body.innerText : '').slice(0, 4000)") or ""
+                url = (f.url or "").lower()
+                if not url.startswith("http"):
+                    continue
+                txt = f.locator("body").inner_text(timeout=1500) or ""
             except Exception:  # noqa: BLE001
                 continue
             if any(k in txt for k in self.LOCK_MARKS):
@@ -593,11 +603,16 @@ class Runner:
         # 锁定状态只属于本次打开尝试；任何提前返回都不能污染下一章节。
         self._last_locked = False
         log = self.log
+        # ★ 心跳日志（INFO 级）：历史上多次卡在「开始处理 X.X」后再无输出。
+        #   每条都跟在一个可能阻塞的调用之前，下一轮若再卡，日志最后一行
+        #   就精确指出是哪个调用挂起，避免继续盲猜。
+        log.info(f"  [心跳] 定位章节树 cur{ch.id}")
         page = self._tree_page()
         frame, el = course_mod.chapter_element(page, ch.id)
         if el is None:
             log.warning(f"  未在章节树中找到知识点元素 (cur{ch.id})")
             return page, None
+        log.info("  [心跳] 已定位章节元素，点击中")
         # 新版界面(mooc2-ans)点章节不会跳页，内容在同一帧里刷新 → 不必等跳转
         new_ui = "mooc2-ans" in (page.url or "")
         try:
@@ -610,6 +625,7 @@ class Runner:
             return page, None
 
         # 轮询"未开放"提示（通常 1~2 秒就出现，锁定章节可立刻收工）
+        log.info("  [心跳] 点击完成，检查章节开放状态")
         self._last_locked = False
         for i in range(8):
             page.wait_for_timeout(500 if i else 800)
@@ -621,6 +637,7 @@ class Runner:
         self.session.keep_alive()
         if not need_cards:
             return page, None
+        log.info("  [心跳] 开放检查完成，等待内容帧")
         page.wait_for_timeout(1000)
         cards = None
         for _ in range(8):
@@ -629,6 +646,7 @@ class Runner:
                 break
             page.wait_for_timeout(2000)
             self.popup.tick(page)
+        log.info(f"  [心跳] 内容帧{'已就绪' if cards is not None else '未找到'}")
         return page, cards
 
     def process_chapters(self):
@@ -1497,11 +1515,11 @@ class Runner:
         log = self.log
         # ★ 心跳日志：历史上「开始处理 X.X」后曾永久卡住（evaluate 无超时），
         #   加这两条把 card_jobs / 完成度探测分开，下一轮若再卡能立刻定位。
-        log.debug("  小任务点：读取 mArg.attachments…")
+        log.info("  [心跳] 读取 mArg.attachments…")
         jobs = course_mod.card_jobs(cards)
-        log.debug(f"  小任务点：attachments 读取完成（{len(jobs)} 个），探测完成度…")
+        log.info(f"  [心跳] attachments 读取完成（{len(jobs)} 个），探测完成度…")
         ratio = video_mod.detect_completion_ratio(page, default=None)
-        log.debug("  小任务点：完成度探测完成")
+        log.info("  [心跳] 完成度探测完成")
         results = []
         total = 0
         ctype = "video"

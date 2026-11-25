@@ -98,11 +98,32 @@ class PopupGuard:
 
     # ---------------- 已知弹窗 ----------------
     def _close_known(self, page):
-        """单次 JS 探测弹窗；仅当确实存在弹窗时才做点击（避免无谓 CDP 往返）。"""
+        """探测并关闭已知弹窗。
+
+        ★ 2026-11-25 修复卡死：旧版用 page.evaluate(JS_DIALOGS) —— evaluate
+          没有超时，一旦页面 JS 主线程繁忙就永久阻塞；而 tick() 在
+          _open_chapter 每章被调用 8 次以上，正是「开始处理 X.X 后卡死」的高发点。
+          现在改用 locator(query_selector_all) + inner_text(timeout)：
+          两者都受 Playwright 默认超时约束，卡住最多几秒自动跳过。
+        """
+        candidates = []
         try:
-            candidates = page.evaluate(JS_DIALOGS) or []
+            els = page.locator(", ".join(DIALOG_SELECTORS))
+            n = min(els.count(), 12)
         except Exception:  # noqa: BLE001
             return
+        for i in range(n):
+            try:
+                el = els.nth(i)
+                if not el.is_visible():
+                    continue
+                text = (el.inner_text(timeout=1500) or "").strip()[:120]
+                if not text:
+                    continue
+                has_input = el.locator("input, textarea, select").count() > 0
+                candidates.append({"text": text, "hasInput": has_input})
+            except Exception:  # noqa: BLE001
+                continue
         for c in candidates:
             text = (c.get("text") or "").strip()
             if not text:

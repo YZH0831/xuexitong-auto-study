@@ -2,6 +2,33 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.1.7] - 2026-11-25
+
+继续追查「开始处理 10.2 后卡死」——v1.1.6 修的两处不是全部卡点。
+
+### 修复
+
+- **关键发现：上次加的心跳日志用的是 `log.debug()`，而配置是 INFO 级，
+  根本没写进日志**——所以"看不见心跳"不等于没执行到。本次把心跳全部
+  提到 `log.info()`，并在 `_open_chapter` 的每一步（定位章节树 → 点击 →
+  开放检查 → 内容帧 → 读 attachments → 探测完成度）都埋点。下一轮若再卡，
+  日志最后一行会精确指出是哪个调用挂起，不再盲猜。
+- v1.1.6 漏掉的两处**无超时 evaluate**，正好都在 `_open_chapter` 循环里
+  被反复调用（每章 8 次以上），是更可能的真凶：
+  1. `_chapter_locked`：遍历所有 frame 做 `f.evaluate(读 innerText)` →
+     改为跳过非 http 帧 + `locator("body").inner_text(timeout=1500)`。
+  2. `PopupGuard._close_known`：`page.evaluate(JS_DIALOGS)` →
+     改为 `locator(选择器) + inner_text(timeout=1500)`，两者都受超时约束。
+- 新增 `tests/test_no_unguarded_evaluate.py`（5 项）：守住这三条路径
+  不再回退到裸 evaluate，并确认心跳是 INFO 级。
+
+### 说明
+
+- 全部既有测试通过（quiz/retry、core、rescan_quiz_fix、
+  double_instance_and_quiz_tab），`py_compile` OK。
+- 仍是"有证据指向"的修复；但这次心跳可见了，若再卡能一眼定位，
+  请把日志里最后一个 `[心跳]` 行发我。
+
 ## [1.1.6] - 2026-11-25
 
 修复「处理到某个视频章节就永久卡住、既不点测验标签也不点下一节」。

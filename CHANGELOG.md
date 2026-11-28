@@ -2,6 +2,32 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [1.2.4] - 2026-11-28
+
+修复「连点桌面入口.bat 会直接弹出浏览器里的学习通」。
+
+### 根因
+
+v1.2.2 只挡住了「空 url + `edge --app=`」这一条路径，仍有几个口子：
+
+- 抢锁失败的第二个实例在等到端口后仍会自己启动一次 Edge，与首个实例的开窗
+  撞车；同一 Edge profile 连发两次 `--app=`，窗口未就绪时可能退化成普通标签页
+  或恢复上次会话（上次看的就是学习通）。
+- Edge 启动失败时会回落到 `webbrowser.open()`，把地址交给默认浏览器，
+  同样会触发会话恢复。
+- `/api/run` 检查 `PROC` 与登记 `PROC` 不在同一把锁内，连点「运行」时两个
+  HTTP 线程都能通过检查，起两个 `main.py` / 两个 Playwright 学习通窗口。
+
+### 修复
+
+- `open_app_window()` 只接受 `127.0.0.1:8765-8784`；删除 `webbrowser.open()` 兜底；
+  增加 2 秒开窗防抖。
+- 抢锁失败分支和「已有实例」分支只聚焦已有窗口（`allow_launch=False`），
+  不再启动任何浏览器；开窗只由持锁的首个实例负责。
+- `start_job()` 用 `START_LOCK` 串行化「检查 → 拉起 → 登记」；前端 `run()` /
+  `startPicked()` 增加请求在途防连点。
+- `tests/test_no_spurious_browser.py` 扩充到 10 项回归检查；全量 23 个测试脚本通过。
+
 ## [1.2.3] - 2026-11-25
 
 修复 v1.1.8 引入的回归：`card_jobs()` 在「取不到 mArg.attachments」时会抛

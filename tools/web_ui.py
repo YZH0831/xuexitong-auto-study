@@ -71,6 +71,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 LOCK = threading.Lock()
+START_LOCK = threading.Lock()   # 串行化 /api/run，防止连点同时起两个刷课进程
 PROC: subprocess.Popen | None = None
 PROC_CMD = ""
 PROC_START = 0.0
@@ -167,42 +168,64 @@ def wait_for_window(timeout: float = 4.0) -> bool:
     return False
 
 
-def open_app_window(url: str, wait_s: float = 0.0) -> bool:
-    """用 Edge 应用模式打开：独立窗口，无地址栏、无标签页。
+_LOCAL_URL_RE = re.compile(r"^http://127\.0\.0\.1:(\d{2,5})$")
+_APP_LAUNCH_LOCK = threading.Lock()
+_LAST_APP_LAUNCH = 0.0
+_APP_DEBOUNCE_S = 2.0
 
-    ★ 2026-11-25 修复「有时还没选课就自动弹出学习通」：
-      旧版在「第二个实例抢锁失败、而首个实例还没绑好端口」时会传入空 url，
-      于是执行 `edge --app=`（空地址）—— Edge 拿不到目标地址就会打开默认页
-      或**恢复上次浏览会话**，用户上次看的是学习通，就被"自动打开学习通"了。
-      现在：url 为空时绝不启动浏览器，直接返回 False。
+
+def safe_console_url(url: str) -> str:
+    """只接受本控制台自己的 127.0.0.1 地址，杜绝把浏览器导向任何外部页面。"""
+    u = (url or "").strip()
+    m = _LOCAL_URL_RE.fullmatch(u)
+    if not m:
+        return ""
+    port = int(m.group(1))
+    return u if 8765 <= port <= 8784 else ""
+
+
+def open_app_window(url: str, wait_s: float = 0.0, allow_launch: bool = True) -> bool:
+    """打开（或聚焦）控制台窗口。
+
+    ★ 2026-11-28 加固「连点 bat 弹出浏览器里的学习通」：
+      1. 地址必须是 127.0.0.1:8765-8784，否则一律不开浏览器；
+      2. 抢锁失败的实例只允许聚焦已有窗口（allow_launch=False），绝不自行
+         启动 Edge —— 首个实例自己会开窗，连点不会再冒出第二个浏览器；
+      3. 删掉 webbrowser.open 兜底：默认浏览器会恢复上次会话（学习通）；
+      4. 2 秒内的重复开窗请求直接忽略，挡住同一 Edge profile 连发两次。
     """
-    url = (url or "").strip()
-    if not url:
-        # 没有可打开的地址（另一个实例尚未就绪）→ 什么都不做
+    global _LAST_APP_LAUNCH
+    u = safe_console_url(url)
+    if not u:
+        print(f"拒绝打开浏览器：目标不是合法的控制台地址 {url!r}")
         return False
     if wait_s and wait_for_window(wait_s):
         return True
     if focus_window():
         return True
+    if not allow_launch:
+        return False
+    with _APP_LAUNCH_LOCK:
+        now = time.time()
+        if now - _LAST_APP_LAUNCH < _APP_DEBOUNCE_S:
+            return False
+        _LAST_APP_LAUNCH = now
     exe = edge_path()
     if exe:
         try:
-            subprocess.Popen([str(exe), f"--app={url}", "--window-size=1460,960",
+            subprocess.Popen([str(exe), f"--app={u}", "--window-size=1460,960",
                               "--no-first-run", "--no-default-browser-check"])
             return True
         except OSError:
             pass
-    try:
-        webbrowser.open(url)
-    except Exception:  # noqa: BLE001
-        pass
+    # 不再调用 webbrowser.open：默认浏览器可能恢复上次会话，表现为"自动弹出学习通"
     return False
 
 
 def find_running() -> int:
     """已有同项目控制台在跑就返回端口（按项目根目录校验，避免认错其它项目）。"""
     me = str(ROOT).lower()
-    for port in range(8765, 8786):
+    for port in range(8765, 8785):  # 与 pick_port() / safe_console_url() 保持一致
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=0.3) as r:
                 d = json.loads(r.read().decode("utf-8"))
@@ -332,7 +355,7 @@ def parse_progress(lines: list[str]) -> dict:
 
 def version() -> str:
     try:
-        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.2.3"
+        return (ROOT / "VERSION").read_text(encoding="utf-8").strip() or "1.2.4"
     except OSError:
         return "1.1.3"
 
@@ -368,35 +391,40 @@ def start_job(cmd: str, force: bool = False, select: str = "", lessons: str = ""
         return False, "未知命令"
     if not PY.exists():
         return False, "运行环境缺失，请先运行 setup.bat"
-    with LOCK:
-        if PROC is not None and PROC.poll() is None:
-            return False, "已有任务在运行"
-    if not force and external_active():
-        return False, "检测到外部刷课实例正在运行，可能触发多终端顶号"
-    LOGS.mkdir(exist_ok=True)
-    try:
-        fh = CONSOLE_LOG.open("w", encoding="utf-8", errors="replace")
-    except OSError as e:
-        return False, f"无法写控制台日志：{e}"
-    argv = [str(PY), "-u", "main.py", "--config", "config.yaml"] + CMDS[cmd]
-    if select.strip():
-        argv += ["--select", select.strip()]
-    if lessons.strip():
-        argv += ["--lessons", lessons.strip()]
-    try:
-        kw = {"cwd": str(ROOT), "stdin": subprocess.PIPE,
-              "stdout": fh, "stderr": subprocess.STDOUT,
-              "env": _child_env()}
-        if os.name == "nt":
-            kw["creationflags"] = (NO_WINDOW
-                                   | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-            kw["encoding"] = "utf-8"
-        p = subprocess.Popen(argv, **kw)
-    except OSError as e:
-        fh.close()
-        return False, f"启动失败：{e}"
-    with LOCK:
-        PROC, PROC_CMD, PROC_START = p, cmd, time.time()
+    # 连点「运行」按钮时两个 HTTP 线程会同时走到这里。原来只在 LOCK 里检查
+    # PROC、却在外面才赋值，检查与赋值之间存在窗口，两个请求都能通过 →
+    # 起两个 main.py、两个 Playwright 浏览器（表现为又弹出一个学习通）。
+    # 用 START_LOCK 把「检查→建日志→拉起→登记」整段串行化。
+    with START_LOCK:
+        with LOCK:
+            if PROC is not None and PROC.poll() is None:
+                return False, "已有任务在运行"
+        if not force and external_active():
+            return False, "检测到外部刷课实例正在运行，可能触发多终端顶号"
+        LOGS.mkdir(exist_ok=True)
+        try:
+            fh = CONSOLE_LOG.open("w", encoding="utf-8", errors="replace")
+        except OSError as e:
+            return False, f"无法写控制台日志：{e}"
+        argv = [str(PY), "-u", "main.py", "--config", "config.yaml"] + CMDS[cmd]
+        if select.strip():
+            argv += ["--select", select.strip()]
+        if lessons.strip():
+            argv += ["--lessons", lessons.strip()]
+        try:
+            kw = {"cwd": str(ROOT), "stdin": subprocess.PIPE,
+                  "stdout": fh, "stderr": subprocess.STDOUT,
+                  "env": _child_env()}
+            if os.name == "nt":
+                kw["creationflags"] = (NO_WINDOW
+                                       | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+                kw["encoding"] = "utf-8"
+            p = subprocess.Popen(argv, **kw)
+        except OSError as e:
+            fh.close()
+            return False, f"启动失败：{e}"
+        with LOCK:
+            PROC, PROC_CMD, PROC_START = p, cmd, time.time()
     return True, f"已启动：{CMD_LABEL[cmd]}"
 
 
@@ -768,21 +796,18 @@ def main() -> int:
     if not acquire_instance_mutex():
         print("已有控制台实例正在启动或运行，正在切换到已有窗口")
         if not quiet:
-            port = wait_running_port(8.0)
-            if port:
-                open_app_window(f"http://127.0.0.1:{port}", wait_s=4.0)
-            else:
-                # ★ 拿不到端口 = 首个实例还没绑好。这里只提示，绝不启动浏览器：
-                #   以前会带着空 url 开 Edge，Edge 转而恢复上次会话，
-                #   表现就是「还没选课就自动弹出学习通」。
-                print("另一个实例尚未就绪，请稍后再点一次")
+            # 抢锁失败 = 我只是连点产生的多余进程：只等窗口出现并聚焦，
+            # 绝不自己启动浏览器。开窗由持锁的首个实例负责，
+            # 这样连点再快也不会冒出第二个 Edge / 默认浏览器会话。
+            if not wait_for_window(3.0):
+                print("另一个实例尚未就绪或窗口未出现，请稍后再点一次")
         return 0
     running = find_running()
     if running:
         url = f"http://127.0.0.1:{running}"
         print(f"控制台已在运行：{url}")
         if not quiet:
-            open_app_window(url, wait_s=4.0)
+            open_app_window(url, wait_s=4.0, allow_launch=False)
         return 0
     port = pick_port()
     SERVER = ThreadingHTTPServer(("127.0.0.1", port), Handler)
